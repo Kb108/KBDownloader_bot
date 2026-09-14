@@ -76,8 +76,8 @@ logger = logging.getLogger(__name__)
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("📋 Supported Sites"), KeyboardButton("🆘 Help")],
-        [KeyboardButton("📢 Our Channel")],
+        [KeyboardButton("🚀 Start"), KeyboardButton("📋 Supported Sites")],
+        [KeyboardButton("🆘 Help"), KeyboardButton("📢 Our Channel")],
     ],
     resize_keyboard=True,
 )
@@ -224,11 +224,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Just send me a video link, for example:\n"
-        "https://www.youtube.com/watch?v=xxxx\n"
-        "https://www.instagram.com/reel/xxxx\n"
-        "https://vm.tiktok.com/xxxx\n"
-        "https://www.facebook.com/watch/?v=xxxx",
+        "🆘 Need Any Help?\n\n"
+        "Need help or facing any issue?\n"
+        "👉 Join our Help Bot:\n"
+        "https://t.me/KbBotService\n\n"
+        "💬 Send your issue and get help.",
         reply_markup=MAIN_MENU,
     )
 
@@ -295,6 +295,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
 
     # Bottom menu button taps
+    if text == "🚀 Start":
+        await start(update, context)
+        return
     if text == "📋 Supported Sites":
         await update.message.reply_text(supported_sites_text(), parse_mode=ParseMode.MARKDOWN)
         return
