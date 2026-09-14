@@ -37,7 +37,12 @@ FORCE_SUB_CHANNEL_LINK = os.environ.get("FORCE_SUB_CHANNEL_LINK", "https://t.me/
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 MAX_FILESIZE_MB = 50
-USERS_FILE = "users.json"
+# DATA_DIR should point to a persistent Railway Volume (e.g. /data) so the
+# users list survives redeploys and restarts. Falls back to the local folder
+# if no volume is configured (fine for local testing, NOT for production).
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 URL_REGEX = re.compile(r"(https?://\S+)", re.IGNORECASE)
 
