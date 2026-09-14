@@ -36,7 +36,7 @@ FORCE_SUB_CHANNEL_LINK = os.environ.get("FORCE_SUB_CHANNEL_LINK", "https://t.me/
 # Your personal numeric Telegram ID. Needed to use /broadcast. Get it from @userinfobot.
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-MAX_FILESIZE_MB = 50
+MAX_FILESIZE_MB = 500
 # DATA_DIR should point to a persistent Railway Volume (e.g. /data) so the
 # users list survives redeploys and restarts. Falls back to the local folder
 # if no volume is configured (fine for local testing, NOT for production).
