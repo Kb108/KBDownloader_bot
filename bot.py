@@ -50,6 +50,14 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
+# SaverAPI.NET is a specialized third-party downloader service — the same
+# kind of service popular "all-in-one downloader" bots rely on internally.
+# It handles the tricky per-platform parsing (Facebook photos, Instagram
+# albums, Twitter GIFs, etc.) far more reliably than raw yt-dlp scraping.
+# Get a free key at https://saverapi.net and set SAVERAPI_KEY in Railway.
+# If it's not set, the bot falls back to yt-dlp + page-scraping only.
+SAVERAPI_KEY = os.environ.get("SAVERAPI_KEY", "")
+
 # Private/age-restricted content on YouTube, Facebook, and Instagram needs a
 # logged-in browser session's cookies to download. Export cookies.txt from a
 # browser where you're logged into these sites (all three at once works
@@ -181,6 +189,61 @@ async def send_join_prompt(update: Update):
 # ----------------------------------------------------------------------
 # DOWNLOAD LOGIC
 # ----------------------------------------------------------------------
+SAVERAPI_ENDPOINT = "https://saverapi.net/api/all-in-one-downloader-api"
+
+
+def _saverapi_download(url: str, download_dir: str) -> list:
+    """Tries SaverAPI.NET first — a specialized downloader service that
+    handles Facebook photos, Instagram albums, and similar tricky posts far
+    more reliably than raw yt-dlp scraping. Returns [] if no key is set,
+    the platform isn't supported by it, or the request fails."""
+    if not SAVERAPI_KEY:
+        return []
+
+    try:
+        resp = requests.post(
+            SAVERAPI_ENDPOINT,
+            json={"url": url},
+            headers={"Authorization": f"Bearer {SAVERAPI_KEY}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(f"SaverAPI request failed: {e}")
+        return []
+
+    if data.get("error"):
+        return []
+
+    # The API sometimes returns one item ("download_url") and sometimes a
+    # list of items for multi-photo/video posts — handle both shapes.
+    items = data.get("medias") or data.get("items") or data.get("photos")
+    if not items:
+        single_url = data.get("download_url")
+        items = [{"url": single_url, "type": data.get("type", "video")}] if single_url else []
+
+    files = []
+    for i, item in enumerate(items[:10]):
+        media_url = item.get("url") or item.get("download_url")
+        media_type = (item.get("type") or "video").lower()
+        if not media_url:
+            continue
+        try:
+            r = requests.get(media_url, headers=HTTP_HEADERS, timeout=60)
+            r.raise_for_status()
+        except requests.RequestException:
+            continue
+
+        ext = ".mp4" if "video" in media_type else ".jpg" if "photo" in media_type or "image" in media_type else ".mp3"
+        path = os.path.join(download_dir, f"{i:03d}_saverapi{ext}")
+        with open(path, "wb") as f:
+            f.write(r.content)
+        files.append(path)
+
+    return files
+
+
 def _ytdlp_download(url: str, download_dir: str) -> list:
     """Tries downloading with yt-dlp. Returns a list of downloaded file paths
     (possibly several, for multi-item posts like Instagram/Facebook carousels)."""
@@ -278,10 +341,19 @@ def _fallback_scrape(url: str, download_dir: str) -> list:
 
 
 def download_media(url: str, download_dir: str) -> list:
-    """Downloads a post and returns every file it produced. Tries yt-dlp
-    first (handles the vast majority of videos and many photo posts); if
-    that finds nothing, falls back to scraping the page's preview tags —
-    this is what rescues plain Facebook photo posts yt-dlp can't parse."""
+    """Downloads a post and returns every file it produced.
+
+    Tries three approaches in order, each catching where the previous
+    leaves off:
+      1. SaverAPI.NET — the specialized service (if a key is configured),
+         which reliably handles Facebook photos, Instagram albums, etc.
+      2. yt-dlp — handles the vast majority of videos and many photo posts.
+      3. Direct page scraping — a last resort for whatever's left.
+    """
+    files = _saverapi_download(url, download_dir)
+    if files:
+        return files
+
     try:
         files = _ytdlp_download(url, download_dir)
     except yt_dlp.utils.DownloadError:
