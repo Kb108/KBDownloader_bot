@@ -12,6 +12,8 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InputMediaPhoto,
+    InputMediaVideo,
 )
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import TelegramError
@@ -36,13 +38,23 @@ FORCE_SUB_CHANNEL_LINK = os.environ.get("FORCE_SUB_CHANNEL_LINK", "https://t.me/
 # Your personal numeric Telegram ID. Needed to use /broadcast. Get it from @userinfobot.
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-MAX_FILESIZE_MB = 500
+MAX_FILESIZE_MB = 50
 # DATA_DIR should point to a persistent Railway Volume (e.g. /data) so the
 # users list survives redeploys and restarts. Falls back to the local folder
 # if no volume is configured (fine for local testing, NOT for production).
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
+
+# Private/age-restricted content on YouTube, Facebook, and Instagram needs a
+# logged-in browser session's cookies to download. Export cookies.txt from a
+# browser where you're logged into these sites and paste its content into the
+# SITE_COOKIES environment variable. Never commit a cookies.txt file to GitHub.
+SITE_COOKIES = os.environ.get("SITE_COOKIES") or os.environ.get("YOUTUBE_COOKIES", "")
+COOKIES_FILE = os.path.join(DATA_DIR, "cookies.txt")
+if SITE_COOKIES:
+    with open(COOKIES_FILE, "w") as f:
+        f.write(SITE_COOKIES)
 
 URL_REGEX = re.compile(r"(https?://\S+)", re.IGNORECASE)
 
@@ -122,30 +134,40 @@ def supported_sites_text() -> str:
     return "\n".join(lines)
 
 
-def download_video(url: str, download_dir: str) -> str:
-    """Downloads the video with yt-dlp and returns the local file path."""
-    outtmpl = os.path.join(download_dir, "%(title).80s.%(ext)s")
+SKIP_EXTENSIONS = (".part", ".ytdl", ".json", ".description", ".info.json")
+
+
+def download_media(url: str, download_dir: str) -> list:
+    """Downloads the post with yt-dlp and returns a list of all downloaded file paths.
+
+    Handles both single video/photo posts and multi-item posts (e.g. an
+    Instagram/Facebook carousel with several photos and videos in one post).
+    """
+    outtmpl = os.path.join(download_dir, "%(autonumber)03d_%(title).60s.%(ext)s")
 
     ydl_opts = {
         "outtmpl": outtmpl,
         "format": f"best[filesize<{MAX_FILESIZE_MB}M]/best",
-        "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
-        # Some private/age-restricted Instagram or Facebook content needs a
-        # cookies.txt file exported from your browser — uncomment and set the path.
-        # "cookiefile": "cookies.txt",
+        # Cap how many items we'll pull from a single link — protects against
+        # someone accidentally pasting a whole profile/channel URL, and stays
+        # within Telegram's 10-items-per-album limit anyway.
+        "playlistend": 10,
     }
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        base, _ = os.path.splitext(filename)
-        mp4_path = base + ".mp4"
-        if os.path.exists(mp4_path):
-            return mp4_path
-        return filename
+        ydl.extract_info(url, download=True)
+
+    files = sorted(
+        os.path.join(download_dir, name)
+        for name in os.listdir(download_dir)
+        if not name.endswith(SKIP_EXTENSIONS)
+    )
+    return files
 
 
 def join_keyboard() -> InlineKeyboardMarkup:
@@ -215,7 +237,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "👋 Welcome!\n\n"
-        "Send me any video link from YouTube, Facebook, Instagram, TikTok, and more — "
+        "Send me any video, photo, or audio link from YouTube, Facebook, Instagram, TikTok, and more — "
         "I'll download it automatically and send it right back to you.\n\n"
         f"⚠️ Note: Telegram bots can only send files up to {MAX_FILESIZE_MB}MB.",
         reply_markup=MAIN_MENU,
@@ -237,6 +259,15 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏠 Main menu:", reply_markup=MAIN_MENU)
 
 
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: shows how many users have started the bot."""
+    if update.effective_user.id != ADMIN_ID:
+        return  # silently ignore non-admins
+
+    users = load_users()
+    await update.message.reply_text(f"📊 Total users: {len(users)}")
+
+
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -248,24 +279,39 @@ async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ You haven't joined the channel yet!", show_alert=True)
 
 
+BROADCAST_CAPTION_RE = re.compile(r"^/broadcast(@\w+)?\s*", re.IGNORECASE)
+
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: sends a message to every user who has ever started the bot.
 
     Usage:
-      • Reply to any message with /broadcast  -> forwards that message to everyone
-      • /broadcast Your text here              -> sends that text to everyone
+      • Reply to any message with /broadcast          -> forwards that message to everyone
+      • /broadcast Your text here                       -> sends that text to everyone
+      • Send a photo/video with caption "/broadcast ..." -> sends that photo/video to everyone
     """
     if update.effective_user.id != ADMIN_ID:
         return  # silently ignore non-admins
 
-    source_message = update.message.reply_to_message
-    text = " ".join(context.args) if context.args else None
+    message = update.message
+    source_message = message.reply_to_message
+    text = None
+    override_caption = None
+
+    if not source_message:
+        if message.caption and BROADCAST_CAPTION_RE.match(message.caption):
+            # A photo/video/document sent directly with "/broadcast ..." as its caption.
+            source_message = message
+            override_caption = BROADCAST_CAPTION_RE.sub("", message.caption).strip()
+        elif context.args:
+            text = " ".join(context.args)
 
     if not source_message and not text:
         await update.message.reply_text(
             "Usage:\n"
             "• Reply to any message with /broadcast to forward it to all users, or\n"
-            "• /broadcast Your message here"
+            "• /broadcast Your message here, or\n"
+            "• Send a photo/video with \"/broadcast your caption\" as the caption"
         )
         return
 
@@ -275,7 +321,11 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for uid in users:
         try:
-            if source_message:
+            if source_message is message:
+                # Broadcasting the media message itself — strip the /broadcast
+                # command out of the caption before it goes to everyone.
+                await source_message.copy(chat_id=uid, caption=override_caption or None)
+            elif source_message:
                 await source_message.copy(chat_id=uid)
             else:
                 await context.bot.send_message(chat_id=uid, text=text)
@@ -290,6 +340,65 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------------------------------------------------------------
 # MAIN MESSAGE HANDLER
 # ----------------------------------------------------------------------
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
+
+
+async def send_downloaded_file(update: Update, file_path: str):
+    """Sends a single downloaded file back as a photo, audio, or video — whichever fits."""
+    ext = os.path.splitext(file_path)[1].lower()
+
+    with open(file_path, "rb") as f:
+        if ext in IMAGE_EXTENSIONS:
+            await update.message.reply_photo(photo=f, caption="✅ Here's your photo!")
+        elif ext in AUDIO_EXTENSIONS:
+            await update.message.reply_audio(
+                audio=f, caption="✅ Here's your audio!", read_timeout=120, write_timeout=120
+            )
+        else:
+            await update.message.reply_video(
+                video=f,
+                caption="✅ Here's your video!",
+                supports_streaming=True,
+                read_timeout=120,
+                write_timeout=120,
+            )
+
+
+async def send_downloaded_files(update: Update, file_paths: list):
+    """Sends one or many downloaded files. Multiple photos/videos from the same
+    post (e.g. an Instagram/Facebook carousel) go out together as an album."""
+    if len(file_paths) == 1:
+        await send_downloaded_file(update, file_paths[0])
+        return
+
+    # Telegram albums can only hold photos+videos together (not audio mixed in),
+    # and at most 10 items per album — send any audio files separately.
+    album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
+    audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
+
+    for i in range(0, len(album_paths), 10):
+        batch = album_paths[i : i + 10]
+        opened_files = []
+        media = []
+        for path in batch:
+            f = open(path, "rb")
+            opened_files.append(f)
+            ext = os.path.splitext(path)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                media.append(InputMediaPhoto(media=f))
+            else:
+                media.append(InputMediaVideo(media=f))
+        if media:
+            media[0].caption = "✅ Here's everything from that post!"
+            await update.message.reply_media_group(media=media, read_timeout=120, write_timeout=120)
+        for f in opened_files:
+            f.close()
+
+    for path in audio_paths:
+        await send_downloaded_file(update, path)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
@@ -333,24 +442,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
             loop = asyncio.get_running_loop()
-            file_path = await loop.run_in_executor(None, download_video, url, tmp_dir)
+            file_paths = await loop.run_in_executor(None, download_media, url, tmp_dir)
             progress_task.cancel()
 
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            if file_size_mb > MAX_FILESIZE_MB:
+            if not file_paths:
+                await status_msg.edit_text("❌ Couldn't find anything to download from that link.")
+                return
+
+            # Drop anything over the size limit, but still send what fits.
+            fitting_paths = [
+                p for p in file_paths if os.path.getsize(p) / (1024 * 1024) <= MAX_FILESIZE_MB
+            ]
+            skipped = len(file_paths) - len(fitting_paths)
+
+            if not fitting_paths:
                 await status_msg.edit_text(
-                    f"❌ This video is {file_size_mb:.1f}MB, which is over the {MAX_FILESIZE_MB}MB limit."
+                    f"❌ This file is over the {MAX_FILESIZE_MB}MB limit, so it can't be sent."
                 )
                 return
 
             await status_msg.edit_text("📤 Uploading...")
-            with open(file_path, "rb") as video_file:
-                await update.message.reply_video(
-                    video=video_file,
-                    caption="✅ Here's your video!",
-                    supports_streaming=True,
-                    read_timeout=120,
-                    write_timeout=120,
+            await send_downloaded_files(update, fitting_paths)
+            if skipped:
+                await update.message.reply_text(
+                    f"⚠️ {skipped} item(s) from this post were skipped — over the {MAX_FILESIZE_MB}MB limit."
                 )
             await status_msg.delete()
 
@@ -358,7 +473,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_task.cancel()
             logger.error(f"Download error: {e}")
             await status_msg.edit_text(
-                "❌ Couldn't download this video. It might be private, the link may be wrong, "
+                "❌ Couldn't download this. It might be private, the link may be wrong, "
                 "or the platform is blocking downloads right now."
             )
         except Exception as e:
@@ -380,6 +495,10 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(
+        MessageHandler(filters.CaptionRegex(BROADCAST_CAPTION_RE), broadcast_command)
+    )
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
