@@ -5,6 +5,7 @@ import logging
 import tempfile
 import asyncio
 
+import requests
 import yt_dlp
 from telegram import (
     Update,
@@ -31,25 +32,29 @@ from telegram.ext import (
 # ----------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 
-# Force-subscribe channel. Set these in Railway Variables if you ever change channels.
+# Force-subscribe channel. Change these in Railway Variables if you ever
+# switch channels — no code edit needed.
 FORCE_SUB_CHANNEL = os.environ.get("FORCE_SUB_CHANNEL", "@loot_dells")
 FORCE_SUB_CHANNEL_LINK = os.environ.get("FORCE_SUB_CHANNEL_LINK", "https://t.me/loot_dells")
 
-# Your personal numeric Telegram ID. Needed to use /broadcast. Get it from @userinfobot.
+# Your personal numeric Telegram ID. Needed for /broadcast and /stats.
+# Get it from @userinfobot.
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 MAX_FILESIZE_MB = 50
+
 # DATA_DIR should point to a persistent Railway Volume (e.g. /data) so the
-# users list survives redeploys and restarts. Falls back to the local folder
-# if no volume is configured (fine for local testing, NOT for production).
+# users list and cookies survive redeploys and restarts. Falls back to the
+# local folder if no volume is configured (fine for local testing only).
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
 # Private/age-restricted content on YouTube, Facebook, and Instagram needs a
 # logged-in browser session's cookies to download. Export cookies.txt from a
-# browser where you're logged into these sites and paste its content into the
-# SITE_COOKIES environment variable. Never commit a cookies.txt file to GitHub.
+# browser where you're logged into these sites (all three at once works
+# great) and paste its content into the SITE_COOKIES environment variable.
+# Never commit a cookies.txt file to GitHub.
 SITE_COOKIES = os.environ.get("SITE_COOKIES") or os.environ.get("YOUTUBE_COOKIES", "")
 COOKIES_FILE = os.path.join(DATA_DIR, "cookies.txt")
 if SITE_COOKIES:
@@ -80,6 +85,17 @@ SUPPORTED_SITES = {
 }
 SUPPORTED_DOMAINS = [d for domains in SUPPORTED_SITES.values() for d in domains]
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
+SKIP_EXTENSIONS = (".part", ".ytdl", ".json", ".description", ".info.json")
+
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+}
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -96,7 +112,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
 
 
 # ----------------------------------------------------------------------
-# SIMPLE USER STORAGE (for /broadcast)
+# SIMPLE USER STORAGE (for /broadcast and /stats)
 # ----------------------------------------------------------------------
 def load_users() -> set:
     if os.path.exists(USERS_FILE):
@@ -134,42 +150,6 @@ def supported_sites_text() -> str:
     return "\n".join(lines)
 
 
-SKIP_EXTENSIONS = (".part", ".ytdl", ".json", ".description", ".info.json")
-
-
-def download_media(url: str, download_dir: str) -> list:
-    """Downloads the post with yt-dlp and returns a list of all downloaded file paths.
-
-    Handles both single video/photo posts and multi-item posts (e.g. an
-    Instagram/Facebook carousel with several photos and videos in one post).
-    """
-    outtmpl = os.path.join(download_dir, "%(autonumber)03d_%(title).60s.%(ext)s")
-
-    ydl_opts = {
-        "outtmpl": outtmpl,
-        "format": f"best[filesize<{MAX_FILESIZE_MB}M]/best",
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-        # Cap how many items we'll pull from a single link — protects against
-        # someone accidentally pasting a whole profile/channel URL, and stays
-        # within Telegram's 10-items-per-album limit anyway.
-        "playlistend": 10,
-    }
-    if os.path.exists(COOKIES_FILE):
-        ydl_opts["cookiefile"] = COOKIES_FILE
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
-
-    files = sorted(
-        os.path.join(download_dir, name)
-        for name in os.listdir(download_dir)
-        if not name.endswith(SKIP_EXTENSIONS)
-    )
-    return files
-
-
 def join_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -199,29 +179,176 @@ async def send_join_prompt(update: Update):
 
 
 # ----------------------------------------------------------------------
-# DOWNLOAD ANIMATION
+# DOWNLOAD LOGIC
 # ----------------------------------------------------------------------
-async def _animate_progress(status_msg, bot, chat_id):
-    """Cycles a small text animation on the status message while downloading,
-    and keeps the 'uploading video...' indicator alive in the chat header."""
-    frames = [
-        "⏳ Downloading",
-        "⏳ Downloading.",
-        "⏳ Downloading..",
-        "⏳ Downloading...",
-    ]
-    i = 0
+def _ytdlp_download(url: str, download_dir: str) -> list:
+    """Tries downloading with yt-dlp. Returns a list of downloaded file paths
+    (possibly several, for multi-item posts like Instagram/Facebook carousels)."""
+    outtmpl = os.path.join(download_dir, "%(autonumber)03d_%(title).60s.%(ext)s")
+
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "format": f"best[filesize<{MAX_FILESIZE_MB}M]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "merge_output_format": "mp4",
+        # Cap items pulled from one link — guards against someone pasting a
+        # whole profile/channel URL, and Telegram albums max out at 10 anyway.
+        "playlistend": 10,
+    }
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
+
+    return sorted(
+        os.path.join(download_dir, name)
+        for name in os.listdir(download_dir)
+        if not name.endswith(SKIP_EXTENSIONS)
+    )
+
+
+def _fallback_scrape(url: str, download_dir: str) -> list:
+    """Last-resort fallback for posts yt-dlp's extractors don't handle well —
+    most commonly plain Facebook photo posts. Fetches the page HTML directly
+    and pulls whatever og:video / og:image tags it can find."""
+    cookies = None
+    if os.path.exists(COOKIES_FILE):
+        try:
+            jar = requests.cookies.RequestsCookieJar()
+            with open(COOKIES_FILE) as f:
+                for line in f:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    parts = line.strip().split("\t")
+                    if len(parts) == 7:
+                        domain, _, path, _, _, name, value = parts
+                        jar.set(name, value, domain=domain, path=path)
+            cookies = jar
+        except Exception as e:
+            logger.warning(f"Could not parse cookies for fallback scrape: {e}")
+
     try:
-        while True:
-            try:
-                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
-                await status_msg.edit_text(frames[i % len(frames)])
-            except TelegramError:
-                pass  # e.g. "message is not modified" — safe to ignore
-            i += 1
-            await asyncio.sleep(1.5)
-    except asyncio.CancelledError:
-        pass
+        resp = requests.get(url, headers=HTTP_HEADERS, cookies=cookies, timeout=20)
+        resp.raise_for_status()
+        html = resp.text
+    except requests.RequestException as e:
+        logger.error(f"Fallback scrape request failed: {e}")
+        return []
+
+    media_urls = []
+    for pattern in (
+        r'<meta[^>]+property="og:video(?::url)?"[^>]+content="([^"]+)"',
+        r'<meta[^>]+property="og:image(?::url)?"[^>]+content="([^"]+)"',
+    ):
+        media_urls += re.findall(pattern, html)
+
+    seen, ordered = set(), []
+    for u in media_urls:
+        u = u.replace("&amp;", "&")
+        if u not in seen:
+            seen.add(u)
+            ordered.append(u)
+
+    files = []
+    for i, media_url in enumerate(ordered[:10]):
+        try:
+            r = requests.get(media_url, headers=HTTP_HEADERS, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException:
+            continue
+
+        content_type = r.headers.get("Content-Type", "")
+        if "video" in content_type:
+            ext = ".mp4"
+        elif "png" in content_type:
+            ext = ".png"
+        elif "webp" in content_type:
+            ext = ".webp"
+        else:
+            ext = ".jpg"
+
+        path = os.path.join(download_dir, f"{i:03d}_fallback{ext}")
+        with open(path, "wb") as f:
+            f.write(r.content)
+        files.append(path)
+
+    return files
+
+
+def download_media(url: str, download_dir: str) -> list:
+    """Downloads a post and returns every file it produced. Tries yt-dlp
+    first (handles the vast majority of videos and many photo posts); if
+    that finds nothing, falls back to scraping the page's preview tags —
+    this is what rescues plain Facebook photo posts yt-dlp can't parse."""
+    try:
+        files = _ytdlp_download(url, download_dir)
+    except yt_dlp.utils.DownloadError:
+        files = []
+
+    if not files:
+        files = _fallback_scrape(url, download_dir)
+
+    return files
+
+
+# ----------------------------------------------------------------------
+# SENDING DOWNLOADED FILES BACK
+# ----------------------------------------------------------------------
+async def send_downloaded_file(update: Update, file_path: str):
+    """Sends a single downloaded file back as a photo, audio, or video."""
+    ext = os.path.splitext(file_path)[1].lower()
+
+    with open(file_path, "rb") as f:
+        if ext in IMAGE_EXTENSIONS:
+            await update.message.reply_photo(photo=f, caption="✅ Here's your photo!")
+        elif ext in AUDIO_EXTENSIONS:
+            await update.message.reply_audio(
+                audio=f, caption="✅ Here's your audio!", read_timeout=120, write_timeout=120
+            )
+        else:
+            await update.message.reply_video(
+                video=f,
+                caption="✅ Here's your video!",
+                supports_streaming=True,
+                read_timeout=120,
+                write_timeout=120,
+            )
+
+
+async def send_downloaded_files(update: Update, file_paths: list):
+    """Sends one or many downloaded files. Multiple photos/videos from the
+    same post (e.g. a carousel) go out together as an album."""
+    if len(file_paths) == 1:
+        await send_downloaded_file(update, file_paths[0])
+        return
+
+    # Telegram albums can only hold photos+videos together (not audio mixed
+    # in), and at most 10 items per album — send any audio separately.
+    album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
+    audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
+
+    for i in range(0, len(album_paths), 10):
+        batch = album_paths[i : i + 10]
+        opened_files = []
+        media = []
+        for path in batch:
+            f = open(path, "rb")
+            opened_files.append(f)
+            ext = os.path.splitext(path)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                media.append(InputMediaPhoto(media=f))
+            else:
+                media.append(InputMediaVideo(media=f))
+        if media:
+            media[0].caption = "✅ Here's everything from that post!"
+            await update.message.reply_media_group(media=media, read_timeout=120, write_timeout=120)
+        for f in opened_files:
+            f.close()
+
+    for path in audio_paths:
+        await send_downloaded_file(update, path)
 
 
 # ----------------------------------------------------------------------
@@ -237,8 +364,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "👋 Welcome!\n\n"
-        "Send me any video, photo, or audio link from YouTube, Facebook, Instagram, TikTok, and more — "
-        "I'll download it automatically and send it right back to you.\n\n"
+        "Send me any video, photo, or audio link from YouTube, Facebook, Instagram, "
+        "TikTok, and more — I'll download it automatically and send it right back to you.\n\n"
         f"⚠️ Note: Telegram bots can only send files up to {MAX_FILESIZE_MB}MB.",
         reply_markup=MAIN_MENU,
     )
@@ -286,9 +413,9 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: sends a message to every user who has ever started the bot.
 
     Usage:
-      • Reply to any message with /broadcast          -> forwards that message to everyone
-      • /broadcast Your text here                       -> sends that text to everyone
-      • Send a photo/video with caption "/broadcast ..." -> sends that photo/video to everyone
+      • Reply to any message with /broadcast           -> forwards that message to everyone
+      • /broadcast Your text here                        -> sends that text to everyone
+      • Send a photo/video with caption "/broadcast ..."  -> sends that photo/video to everyone
     """
     if update.effective_user.id != ADMIN_ID:
         return  # silently ignore non-admins
@@ -338,67 +465,34 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ----------------------------------------------------------------------
+# DOWNLOAD ANIMATION
+# ----------------------------------------------------------------------
+async def _animate_progress(status_msg, bot, chat_id):
+    """Cycles a small text animation on the status message while downloading,
+    and keeps the 'uploading video...' indicator alive in the chat header."""
+    frames = [
+        "⏳ Downloading",
+        "⏳ Downloading.",
+        "⏳ Downloading..",
+        "⏳ Downloading...",
+    ]
+    i = 0
+    try:
+        while True:
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                await status_msg.edit_text(frames[i % len(frames)])
+            except TelegramError:
+                pass  # e.g. "message is not modified" — safe to ignore
+            i += 1
+            await asyncio.sleep(1.5)
+    except asyncio.CancelledError:
+        pass
+
+
+# ----------------------------------------------------------------------
 # MAIN MESSAGE HANDLER
 # ----------------------------------------------------------------------
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
-
-
-async def send_downloaded_file(update: Update, file_path: str):
-    """Sends a single downloaded file back as a photo, audio, or video — whichever fits."""
-    ext = os.path.splitext(file_path)[1].lower()
-
-    with open(file_path, "rb") as f:
-        if ext in IMAGE_EXTENSIONS:
-            await update.message.reply_photo(photo=f, caption="✅ Here's your photo!")
-        elif ext in AUDIO_EXTENSIONS:
-            await update.message.reply_audio(
-                audio=f, caption="✅ Here's your audio!", read_timeout=120, write_timeout=120
-            )
-        else:
-            await update.message.reply_video(
-                video=f,
-                caption="✅ Here's your video!",
-                supports_streaming=True,
-                read_timeout=120,
-                write_timeout=120,
-            )
-
-
-async def send_downloaded_files(update: Update, file_paths: list):
-    """Sends one or many downloaded files. Multiple photos/videos from the same
-    post (e.g. an Instagram/Facebook carousel) go out together as an album."""
-    if len(file_paths) == 1:
-        await send_downloaded_file(update, file_paths[0])
-        return
-
-    # Telegram albums can only hold photos+videos together (not audio mixed in),
-    # and at most 10 items per album — send any audio files separately.
-    album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
-    audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
-
-    for i in range(0, len(album_paths), 10):
-        batch = album_paths[i : i + 10]
-        opened_files = []
-        media = []
-        for path in batch:
-            f = open(path, "rb")
-            opened_files.append(f)
-            ext = os.path.splitext(path)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
-                media.append(InputMediaPhoto(media=f))
-            else:
-                media.append(InputMediaVideo(media=f))
-        if media:
-            media[0].caption = "✅ Here's everything from that post!"
-            await update.message.reply_media_group(media=media, read_timeout=120, write_timeout=120)
-        for f in opened_files:
-            f.close()
-
-    for path in audio_paths:
-        await send_downloaded_file(update, path)
-
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
@@ -446,7 +540,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_task.cancel()
 
             if not file_paths:
-                await status_msg.edit_text("❌ Couldn't find anything to download from that link.")
+                await status_msg.edit_text(
+                    "❌ Couldn't download this. It might be private, the link may be wrong, "
+                    "or the platform is blocking downloads right now."
+                )
                 return
 
             # Drop anything over the size limit, but still send what fits.
@@ -469,13 +566,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             await status_msg.delete()
 
-        except yt_dlp.utils.DownloadError as e:
-            progress_task.cancel()
-            logger.error(f"Download error: {e}")
-            await status_msg.edit_text(
-                "❌ Couldn't download this. It might be private, the link may be wrong, "
-                "or the platform is blocking downloads right now."
-            )
         except Exception as e:
             progress_task.cancel()
             logger.error(f"Unexpected error: {e}")
