@@ -55,7 +55,9 @@ USERS_FILE = os.path.join(DATA_DIR, "users.json")
 # It handles the tricky per-platform parsing (Facebook photos, Instagram
 # albums, Twitter GIFs, etc.) far more reliably than raw yt-dlp scraping.
 # Get a free key at https://saverapi.net and set SAVERAPI_KEY in Railway.
-# If it's not set, the bot falls back to yt-dlp + page-scraping only.
+# If it's not set, the bot falls back to yt-dlp + page-scraping only —
+# which is noticeably weaker for pure PHOTO posts (yt-dlp is primarily a
+# *video* extractor, and page-scraping breaks on any login-walled page).
 SAVERAPI_KEY = os.environ.get("SAVERAPI_KEY", "")
 
 # Private/age-restricted content on YouTube, Facebook, and Instagram needs a
@@ -109,6 +111,15 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+if not SAVERAPI_KEY:
+    logger.warning(
+        "SAVERAPI_KEY is not set. Photo-only posts (especially Facebook and "
+        "Instagram) are the weakest case without it — yt-dlp is built for "
+        "video, and the raw page-scrape fallback breaks on login-walled "
+        "pages. Get a free key at https://saverapi.net and set SAVERAPI_KEY "
+        "in your Railway Variables to fix most photo-download failures."
+    )
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
@@ -214,6 +225,7 @@ def _saverapi_download(url: str, download_dir: str) -> list:
         return []
 
     if data.get("error"):
+        logger.warning(f"SaverAPI returned an error for {url}: {data.get('error')}")
         return []
 
     # The API sometimes returns one item ("download_url") and sometimes a
@@ -222,6 +234,10 @@ def _saverapi_download(url: str, download_dir: str) -> list:
     if not items:
         single_url = data.get("download_url")
         items = [{"url": single_url, "type": data.get("type", "video")}] if single_url else []
+
+    if not items:
+        logger.warning(f"SaverAPI returned no downloadable items for {url}: {data}")
+        return []
 
     files = []
     for i, item in enumerate(items[:10]):
@@ -232,7 +248,8 @@ def _saverapi_download(url: str, download_dir: str) -> list:
         try:
             r = requests.get(media_url, headers=HTTP_HEADERS, timeout=60)
             r.raise_for_status()
-        except requests.RequestException:
+        except requests.RequestException as e:
+            logger.warning(f"SaverAPI media download failed for {media_url}: {e}")
             continue
 
         ext = ".mp4" if "video" in media_type else ".jpg" if "photo" in media_type or "image" in media_type else ".mp3"
@@ -246,7 +263,14 @@ def _saverapi_download(url: str, download_dir: str) -> list:
 
 def _ytdlp_download(url: str, download_dir: str) -> list:
     """Tries downloading with yt-dlp. Returns a list of downloaded file paths
-    (possibly several, for multi-item posts like Instagram/Facebook carousels)."""
+    (possibly several, for multi-item posts like Instagram/Facebook carousels).
+
+    Note: yt-dlp is primarily a *video* extractor. It does download stand-
+    alone photo posts on some sites (e.g. Twitter, some Instagram posts),
+    but it's far less reliable at this than SaverAPI — this is the #1
+    reason photo links can fail even when video links from the same site
+    work fine.
+    """
     outtmpl = os.path.join(download_dir, "%(autonumber)03d_%(title).60s.%(ext)s")
 
     ydl_opts = {
@@ -274,8 +298,15 @@ def _ytdlp_download(url: str, download_dir: str) -> list:
 
 def _fallback_scrape(url: str, download_dir: str) -> list:
     """Last-resort fallback for posts yt-dlp's extractors don't handle well —
-    most commonly plain Facebook photo posts. Fetches the page HTML directly
-    and pulls whatever og:video / og:image tags it can find."""
+    most commonly plain Facebook/Instagram photo posts. Fetches the page HTML
+    directly and pulls whatever og/twitter image or video tags it can find.
+
+    Note: this only works if requests.get() actually receives the real page
+    (not a login wall). Facebook and Instagram frequently serve a stripped
+    login page to logged-out / non-browser requests, in which case there is
+    no real og:image to find and this tier will legitimately return [] —
+    that's the scenario SaverAPI (see SAVERAPI_KEY above) is meant to cover.
+    """
     cookies = None
     if os.path.exists(COOKIES_FILE):
         try:
@@ -303,9 +334,15 @@ def _fallback_scrape(url: str, download_dir: str) -> list:
     media_urls = []
     for pattern in (
         r'<meta[^>]+property="og:video(?::url)?"[^>]+content="([^"]+)"',
-        r'<meta[^>]+property="og:image(?::url)?"[^>]+content="([^"]+)"',
+        r'<meta[^>]+property="og:image(?::secure_url)?"[^>]+content="([^"]+)"',
+        r'<meta[^>]+name="twitter:image"[^>]+content="([^"]+)"',
+        # Some pages emit content before property/name — cover that order too.
+        r'<meta[^>]+content="([^"]+)"[^>]+property="og:image(?::secure_url)?"',
     ):
         media_urls += re.findall(pattern, html)
+
+    if not media_urls:
+        logger.warning(f"Fallback scrape found no og/twitter media tags for {url} — likely a login wall.")
 
     seen, ordered = set(), []
     for u in media_urls:
@@ -347,20 +384,34 @@ def download_media(url: str, download_dir: str) -> list:
     leaves off:
       1. SaverAPI.NET — the specialized service (if a key is configured),
          which reliably handles Facebook photos, Instagram albums, etc.
-      2. yt-dlp — handles the vast majority of videos and many photo posts.
+      2. yt-dlp — handles the vast majority of videos and some photo posts.
       3. Direct page scraping — a last resort for whatever's left.
+
+    Every tier logs why it failed, so Railway logs will show exactly which
+    step a failing link is dying at.
     """
     files = _saverapi_download(url, download_dir)
     if files:
+        logger.info(f"[{url}] downloaded via SaverAPI: {len(files)} file(s)")
         return files
 
     try:
         files = _ytdlp_download(url, download_dir)
-    except yt_dlp.utils.DownloadError:
+        if files:
+            logger.info(f"[{url}] downloaded via yt-dlp: {len(files)} file(s)")
+    except Exception as e:
+        # Broadened from yt_dlp.utils.DownloadError -> Exception: yt-dlp can
+        # raise other error types (e.g. ExtractorError) for photo-only posts
+        # it doesn't fully support, and those must not skip the fallback tier.
+        logger.warning(f"[{url}] yt-dlp failed, falling back to page scrape: {e}")
         files = []
 
     if not files:
         files = _fallback_scrape(url, download_dir)
+        if files:
+            logger.info(f"[{url}] downloaded via fallback scrape: {len(files)} file(s)")
+        else:
+            logger.error(f"[{url}] all three download tiers failed.")
 
     return files
 
