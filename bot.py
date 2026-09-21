@@ -203,6 +203,34 @@ async def send_join_prompt(update: Update):
 SAVERAPI_ENDPOINT = "https://saverapi.net/api/all-in-one-downloader-api"
 
 
+def _resolve_redirect(url: str) -> str:
+    """Follows short/share links (facebook.com/share/p/..., fb.watch, pin.it,
+    vm.tiktok.com, etc.) to their final real URL before handing off to any
+    downloader tier. SaverAPI and yt-dlp both work far more reliably against
+    the resolved post URL than against a redirect wrapper — a share-link
+    that never gets resolved is a common reason a photo post fails to
+    download even though a direct link to the same kind of post works."""
+    try:
+        resp = requests.head(
+            url, headers=HTTP_HEADERS, allow_redirects=True, timeout=10
+        )
+        final_url = resp.url
+    except requests.RequestException:
+        try:
+            resp = requests.get(
+                url, headers=HTTP_HEADERS, allow_redirects=True, timeout=15, stream=True
+            )
+            final_url = resp.url
+            resp.close()
+        except requests.RequestException as e:
+            logger.warning(f"Could not resolve redirect for {url}: {e}")
+            return url
+
+    if final_url != url:
+        logger.info(f"Resolved redirect: {url} -> {final_url}")
+    return final_url
+
+
 def _saverapi_download(url: str, download_dir: str) -> list:
     """Tries SaverAPI.NET first — a specialized downloader service that
     handles Facebook photos, Instagram albums, and similar tricky posts far
@@ -390,6 +418,8 @@ def download_media(url: str, download_dir: str) -> list:
     Every tier logs why it failed, so Railway logs will show exactly which
     step a failing link is dying at.
     """
+    url = _resolve_redirect(url)
+
     files = _saverapi_download(url, download_dir)
     if files:
         logger.info(f"[{url}] downloaded via SaverAPI: {len(files)} file(s)")
