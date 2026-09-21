@@ -236,13 +236,29 @@ def _resolve_redirect(url: str) -> str:
     return final_url
 
 
-def _saverapi_download(url: str, download_dir: str) -> list:
+def _clean_caption(text) -> str:
+    """Normalizes a caption pulled from a source post: strips whitespace,
+    collapses blank lines, and trims to Telegram's 1024-char caption limit
+    (leaving room for the small credit line appended when sending)."""
+    if not text:
+        return ""
+    text = str(text).strip()
+    if not text:
+        return ""
+    limit = 1000
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def _saverapi_download(url: str, download_dir: str) -> tuple:
     """Tries SaverAPI.NET first — a specialized downloader service that
     handles Facebook photos, Instagram albums, and similar tricky posts far
-    more reliably than raw yt-dlp scraping. Returns [] if no key is set,
-    the platform isn't supported by it, or the request fails."""
+    more reliably than raw yt-dlp scraping. Returns ([], "") if no key is
+    set, the platform isn't supported by it, or the request fails.
+    Returns (files, original_caption)."""
     if not SAVERAPI_KEY:
-        return []
+        return [], ""
 
     try:
         resp = requests.get(
@@ -255,11 +271,13 @@ def _saverapi_download(url: str, download_dir: str) -> list:
         data = resp.json()
     except (requests.RequestException, ValueError) as e:
         logger.warning(f"SaverAPI request failed: {e}")
-        return []
+        return [], ""
 
     if data.get("error"):
         logger.warning(f"SaverAPI returned an error for {url}: {data.get('error')}")
-        return []
+        return [], ""
+
+    caption = _clean_caption(data.get("caption") or data.get("title"))
 
     # The API sometimes returns one item ("download_url") and sometimes a
     # list of items for multi-photo/video posts — handle both shapes.
@@ -270,7 +288,7 @@ def _saverapi_download(url: str, download_dir: str) -> list:
 
     if not items:
         logger.warning(f"SaverAPI returned no downloadable items for {url}: {data}")
-        return []
+        return [], ""
 
     files = []
     for i, item in enumerate(items[:10]):
@@ -291,12 +309,14 @@ def _saverapi_download(url: str, download_dir: str) -> list:
             f.write(r.content)
         files.append(path)
 
-    return files
+    return files, caption
 
 
-def _ytdlp_download(url: str, download_dir: str) -> list:
-    """Tries downloading with yt-dlp. Returns a list of downloaded file paths
-    (possibly several, for multi-item posts like Instagram/Facebook carousels).
+def _ytdlp_download(url: str, download_dir: str) -> tuple:
+    """Tries downloading with yt-dlp. Returns (files, original_caption) —
+    files is a list of downloaded file paths (possibly several, for
+    multi-item posts like Instagram/Facebook carousels), and the caption
+    comes from the post's title/description as yt-dlp extracted them.
 
     Note: yt-dlp is primarily a *video* extractor. It does download stand-
     alone photo posts on some sites (e.g. Twitter, some Instagram posts),
@@ -320,19 +340,29 @@ def _ytdlp_download(url: str, download_dir: str) -> list:
         ydl_opts["cookiefile"] = COOKIES_FILE
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=True) or {}
 
-    return sorted(
+    # yt-dlp uses "title" as a generic label even for photo posts (often the
+    # post's own caption text on Instagram/Facebook/Twitter); fall back to
+    # "description" when title is just a generic placeholder.
+    raw_caption = info.get("title") or info.get("description") or ""
+    if raw_caption.lower() in ("", "no title"):
+        raw_caption = info.get("description") or ""
+    caption = _clean_caption(raw_caption)
+
+    files = sorted(
         os.path.join(download_dir, name)
         for name in os.listdir(download_dir)
         if not name.endswith(SKIP_EXTENSIONS)
     )
+    return files, caption
 
 
-def _fallback_scrape(url: str, download_dir: str) -> list:
+def _fallback_scrape(url: str, download_dir: str) -> tuple:
     """Last-resort fallback for posts yt-dlp's extractors don't handle well —
     most commonly plain Facebook/Instagram photo posts. Fetches the page HTML
-    directly and pulls whatever og/twitter image or video tags it can find.
+    directly and pulls whatever og/twitter image or video tags it can find,
+    plus the page's og:title/og:description as the original caption.
 
     Note: this only works if requests.get() actually receives the real page
     (not a login wall). Facebook and Instagram frequently serve a stripped
@@ -362,7 +392,7 @@ def _fallback_scrape(url: str, download_dir: str) -> list:
         html = resp.text
     except requests.RequestException as e:
         logger.error(f"Fallback scrape request failed: {e}")
-        return []
+        return [], ""
 
     media_urls = []
     for pattern in (
@@ -376,6 +406,16 @@ def _fallback_scrape(url: str, download_dir: str) -> list:
 
     if not media_urls:
         logger.warning(f"Fallback scrape found no og/twitter media tags for {url} — likely a login wall.")
+
+    # og:description usually holds the post's own caption text; og:title is
+    # a weaker fallback (often just "Facebook" or the page name).
+    caption_match = re.search(
+        r'<meta[^>]+property="og:description"[^>]+content="([^"]+)"', html
+    ) or re.search(
+        r'<meta[^>]+content="([^"]+)"[^>]+property="og:description"', html
+    )
+    raw_caption = caption_match.group(1) if caption_match else ""
+    caption = _clean_caption(raw_caption.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"'))
 
     seen, ordered = set(), []
     for u in media_urls:
@@ -407,11 +447,11 @@ def _fallback_scrape(url: str, download_dir: str) -> list:
             f.write(r.content)
         files.append(path)
 
-    return files
+    return files, caption
 
 
-def download_media(url: str, download_dir: str) -> list:
-    """Downloads a post and returns every file it produced.
+def download_media(url: str, download_dir: str) -> tuple:
+    """Downloads a post and returns (files, original_caption).
 
     Tries three approaches in order, each catching where the previous
     leaves off:
@@ -425,13 +465,13 @@ def download_media(url: str, download_dir: str) -> list:
     """
     url = _resolve_redirect(url)
 
-    files = _saverapi_download(url, download_dir)
+    files, caption = _saverapi_download(url, download_dir)
     if files:
         logger.info(f"[{url}] downloaded via SaverAPI: {len(files)} file(s)")
-        return files
+        return files, caption
 
     try:
-        files = _ytdlp_download(url, download_dir)
+        files, caption = _ytdlp_download(url, download_dir)
         if files:
             logger.info(f"[{url}] downloaded via yt-dlp: {len(files)} file(s)")
     except Exception as e:
@@ -439,47 +479,49 @@ def download_media(url: str, download_dir: str) -> list:
         # raise other error types (e.g. ExtractorError) for photo-only posts
         # it doesn't fully support, and those must not skip the fallback tier.
         logger.warning(f"[{url}] yt-dlp failed, falling back to page scrape: {e}")
-        files = []
+        files, caption = [], ""
 
     if not files:
-        files = _fallback_scrape(url, download_dir)
+        files, caption = _fallback_scrape(url, download_dir)
         if files:
             logger.info(f"[{url}] downloaded via fallback scrape: {len(files)} file(s)")
         else:
             logger.error(f"[{url}] all three download tiers failed.")
 
-    return files
+    return files, caption
 
 
 # ----------------------------------------------------------------------
 # SENDING DOWNLOADED FILES BACK
 # ----------------------------------------------------------------------
-async def send_downloaded_file(update: Update, file_path: str):
-    """Sends a single downloaded file back as a photo, audio, or video."""
+async def send_downloaded_file(update: Update, file_path: str, caption: str = ""):
+    """Sends a single downloaded file back as a photo, audio, or video,
+    using the original post's caption when one was found."""
     ext = os.path.splitext(file_path)[1].lower()
 
     with open(file_path, "rb") as f:
         if ext in IMAGE_EXTENSIONS:
-            await update.message.reply_photo(photo=f, caption="✅ Here's your photo!")
+            await update.message.reply_photo(photo=f, caption=caption or "✅ Here's your photo!")
         elif ext in AUDIO_EXTENSIONS:
             await update.message.reply_audio(
-                audio=f, caption="✅ Here's your audio!", read_timeout=120, write_timeout=120
+                audio=f, caption=caption or "✅ Here's your audio!", read_timeout=120, write_timeout=120
             )
         else:
             await update.message.reply_video(
                 video=f,
-                caption="✅ Here's your video!",
+                caption=caption or "✅ Here's your video!",
                 supports_streaming=True,
                 read_timeout=120,
                 write_timeout=120,
             )
 
 
-async def send_downloaded_files(update: Update, file_paths: list):
+async def send_downloaded_files(update: Update, file_paths: list, caption: str = ""):
     """Sends one or many downloaded files. Multiple photos/videos from the
-    same post (e.g. a carousel) go out together as an album."""
+    same post (e.g. a carousel) go out together as an album, and carry the
+    original post's caption on the first item when one was found."""
     if len(file_paths) == 1:
-        await send_downloaded_file(update, file_paths[0])
+        await send_downloaded_file(update, file_paths[0], caption)
         return
 
     # Telegram albums can only hold photos+videos together (not audio mixed
@@ -487,11 +529,11 @@ async def send_downloaded_files(update: Update, file_paths: list):
     album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
     audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
 
-    for i in range(0, len(album_paths), 10):
-        batch = album_paths[i : i + 10]
+    for batch_start in range(0, len(album_paths), 10):
+        batch = album_paths[batch_start : batch_start + 10]
         opened_files = []
         media = []
-        for i, path in enumerate(batch):
+        for idx, path in enumerate(batch):
             f = open(path, "rb")
             opened_files.append(f)
             ext = os.path.splitext(path)[1].lower()
@@ -499,18 +541,18 @@ async def send_downloaded_files(update: Update, file_paths: list):
             # InputMediaVideo are immutable after creation in modern
             # python-telegram-bot versions, so setting `.caption =` later
             # raises "Attribute `caption` of class ... can't be set!".
-            caption = "✅ Here's everything from that post!" if i == 0 else None
+            item_caption = (caption or "✅ Here's everything from that post!") if idx == 0 else None
             if ext in IMAGE_EXTENSIONS:
-                media.append(InputMediaPhoto(media=f, caption=caption))
+                media.append(InputMediaPhoto(media=f, caption=item_caption))
             else:
-                media.append(InputMediaVideo(media=f, caption=caption))
+                media.append(InputMediaVideo(media=f, caption=item_caption))
         if media:
             await update.message.reply_media_group(media=media, read_timeout=120, write_timeout=120)
         for f in opened_files:
             f.close()
 
     for path in audio_paths:
-        await send_downloaded_file(update, path)
+        await send_downloaded_file(update, path, caption)
 
 
 # ----------------------------------------------------------------------
@@ -698,7 +740,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
             loop = asyncio.get_running_loop()
-            file_paths = await loop.run_in_executor(None, download_media, url, tmp_dir)
+            file_paths, caption = await loop.run_in_executor(None, download_media, url, tmp_dir)
             progress_task.cancel()
 
             if not file_paths:
@@ -721,7 +763,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             await status_msg.edit_text("📤 Uploading...")
-            await send_downloaded_files(update, fitting_paths)
+            await send_downloaded_files(update, fitting_paths, caption)
             if skipped:
                 await update.message.reply_text(
                     f"⚠️ {skipped} item(s) from this post were skipped — over the {MAX_FILESIZE_MB}MB limit."
