@@ -201,6 +201,11 @@ async def send_join_prompt(update: Update):
 # DOWNLOAD LOGIC
 # ----------------------------------------------------------------------
 SAVERAPI_ENDPOINT = "https://saverapi.net/api/all-in-one-downloader-api"
+# The real SaverAPI.NET contract (confirmed from the official saverapi-client
+# SDK source) is: GET request, the url passed as a query PARAMETER (not a
+# JSON body), and the key sent in an "x-api-key" header (not "Authorization:
+# Bearer ..."). Using the wrong shape here is exactly what produces a
+# 401 Unauthorized even with a perfectly valid key.
 
 
 def _resolve_redirect(url: str) -> str:
@@ -240,10 +245,10 @@ def _saverapi_download(url: str, download_dir: str) -> list:
         return []
 
     try:
-        resp = requests.post(
+        resp = requests.get(
             SAVERAPI_ENDPOINT,
-            json={"url": url},
-            headers={"Authorization": f"Bearer {SAVERAPI_KEY}"},
+            params={"url": url},
+            headers={"x-api-key": SAVERAPI_KEY},
             timeout=30,
         )
         resp.raise_for_status()
