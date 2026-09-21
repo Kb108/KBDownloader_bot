@@ -491,16 +491,20 @@ async def send_downloaded_files(update: Update, file_paths: list):
         batch = album_paths[i : i + 10]
         opened_files = []
         media = []
-        for path in batch:
+        for i, path in enumerate(batch):
             f = open(path, "rb")
             opened_files.append(f)
             ext = os.path.splitext(path)[1].lower()
+            # Caption must be passed at construction time — InputMediaPhoto /
+            # InputMediaVideo are immutable after creation in modern
+            # python-telegram-bot versions, so setting `.caption =` later
+            # raises "Attribute `caption` of class ... can't be set!".
+            caption = "✅ Here's everything from that post!" if i == 0 else None
             if ext in IMAGE_EXTENSIONS:
-                media.append(InputMediaPhoto(media=f))
+                media.append(InputMediaPhoto(media=f, caption=caption))
             else:
-                media.append(InputMediaVideo(media=f))
+                media.append(InputMediaVideo(media=f, caption=caption))
         if media:
-            media[0].caption = "✅ Here's everything from that post!"
             await update.message.reply_media_group(media=media, read_timeout=120, write_timeout=120)
         for f in opened_files:
             f.close()
