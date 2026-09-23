@@ -4,6 +4,8 @@ import json
 import logging
 import tempfile
 import asyncio
+import time
+from urllib.parse import quote
 
 import requests
 import yt_dlp
@@ -41,7 +43,34 @@ FORCE_SUB_CHANNEL_LINK = os.environ.get("FORCE_SUB_CHANNEL_LINK", "https://t.me/
 # Get it from @userinfobot.
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-MAX_FILESIZE_MB = 50
+# NOTE ON THIS LIMIT: Telegram's own cloud Bot API server (api.telegram.org)
+# hard-caps how large a file a bot can UPLOAD at 50MB, no matter what this
+# constant is set to — raising it here alone does not unlock bigger sends;
+# Telegram itself will reject the upload for anything over 50MB even if this
+# check lets it through. Going past 50MB for real requires running your own
+# Local Bot API Server (see LOCAL_BOT_API_BASE_URL below) and pointing this
+# bot at it. Set to 100 as requested — see the chat explanation.
+MAX_FILESIZE_MB = int(os.environ.get("MAX_FILESIZE_MB", "100"))
+
+# Optional: point this bot at a self-hosted Local Bot API Server
+# (https://github.com/tdlib/telegram-bot-api) instead of api.telegram.org.
+# This is the ONLY way to raise the real upload limit (up to 2000MB). Needs
+# your own api_id/api_hash from https://my.telegram.org and a separate
+# service running the telegram-bot-api binary. Leave both blank to keep
+# using Telegram's normal cloud API (50MB cap).
+LOCAL_BOT_API_BASE_URL = os.environ.get("LOCAL_BOT_API_BASE_URL", "")
+LOCAL_BOT_API_BASE_FILE_URL = os.environ.get("LOCAL_BOT_API_BASE_FILE_URL", "")
+
+# Shown as an inline button under every video the bot sends, and under the
+# /start welcome message. Point this at your actual Amazon/Flipkart
+# affiliate link via Railway Variables if you have a different one — it
+# defaults to your existing loot-deals channel link.
+SHOPPING_OFFER_LABEL = os.environ.get("SHOPPING_OFFER_LABEL", "🛒 Amazon Flipkart Offer")
+SHOPPING_OFFER_URL = os.environ.get("SHOPPING_OFFER_URL", FORCE_SUB_CHANNEL_LINK)
+
+# The other button shown under /start — your support/help bot.
+BOT_SERVICE_LABEL = os.environ.get("BOT_SERVICE_LABEL", "🤖 Our Bot Service")
+BOT_SERVICE_LINK = os.environ.get("BOT_SERVICE_LINK", "https://t.me/KbBotService")
 
 # DATA_DIR should point to a persistent Railway Volume (e.g. /data) so the
 # users list and cookies survive redeploys and restarts. Falls back to the
@@ -49,6 +78,33 @@ MAX_FILESIZE_MB = 50
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
+
+# ----------------------------------------------------------------------
+# REFERRAL / POINTS SYSTEM
+# ----------------------------------------------------------------------
+# Every new user starts with this many free downloads before they need to
+# refer anyone — not explicitly specified, so defaulting to a small trial
+# amount; change via Railway Variables any time.
+STARTER_POINTS = int(os.environ.get("STARTER_POINTS", "3"))
+# Points credited to the REFERRER when someone they invited starts the bot
+# for the first time. 1 point = 1 download.
+REFERRAL_POINTS = int(os.environ.get("REFERRAL_POINTS", "10"))
+POINTS_FILE = os.path.join(DATA_DIR, "points.json")
+
+# ----------------------------------------------------------------------
+# PREMIUM (manual UPI payment, admin-verified)
+# ----------------------------------------------------------------------
+# There's no automated payment gateway wired up — the flow is: user pays you
+# directly via UPI (Google Pay / PhonePe / Paytm), sends you the transaction
+# proof, and you run /addpremium <user_id> <days> yourself once you've
+# checked it. Premium users skip the points system entirely (unlimited
+# downloads) until it expires. Set these via Railway Variables to match your
+# actual pricing.
+PREMIUM_PRICE_LABEL = os.environ.get("PREMIUM_PRICE_LABEL", "₹50 / month")
+PREMIUM_PAYMENT_INFO = os.environ.get(
+    "PREMIUM_PAYMENT_INFO", "UPI: yourname@upi (Google Pay / PhonePe / Paytm)"
+)
+PREMIUM_DAYS_DEFAULT = int(os.environ.get("PREMIUM_DAYS_DEFAULT", "30"))
 
 # SaverAPI.NET is a specialized third-party downloader service — the same
 # kind of service popular "all-in-one downloader" bots rely on internally.
@@ -125,6 +181,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🚀 Start"), KeyboardButton("📋 Supported Sites")],
         [KeyboardButton("🆘 Help"), KeyboardButton("📢 Our Channel")],
+        [KeyboardButton("🎁 Refer & Earn"), KeyboardButton("💎 Premium")],
     ],
     resize_keyboard=True,
 )
@@ -152,6 +209,119 @@ def save_user(user_id: int):
 
 
 # ----------------------------------------------------------------------
+# REFERRAL / POINTS STORAGE
+# ----------------------------------------------------------------------
+def load_points() -> dict:
+    if os.path.exists(POINTS_FILE):
+        try:
+            with open(POINTS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_points(data: dict):
+    with open(POINTS_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def _get_or_init_record(user_id: int, data: dict) -> dict:
+    key = str(user_id)
+    if key not in data:
+        data[key] = {"points": STARTER_POINTS, "referred_by": None, "referral_count": 0}
+    return data[key]
+
+
+def get_points(user_id: int) -> int:
+    data = load_points()
+    record = _get_or_init_record(user_id, data)
+    save_points(data)
+    return record["points"]
+
+
+def get_referral_count(user_id: int) -> int:
+    data = load_points()
+    record = _get_or_init_record(user_id, data)
+    save_points(data)
+    return record.get("referral_count", 0)
+
+
+def has_points(user_id: int) -> bool:
+    """Admin and active Premium users always have unlimited downloads."""
+    if user_id == ADMIN_ID:
+        return True
+    if is_premium(user_id):
+        return True
+    return get_points(user_id) > 0
+
+
+def deduct_point(user_id: int) -> bool:
+    """Deducts 1 point for a successful download. Returns False if the user
+    had none left (caller should already have checked has_points() first)."""
+    if user_id == ADMIN_ID or is_premium(user_id):
+        return True
+    data = load_points()
+    record = _get_or_init_record(user_id, data)
+    if record["points"] <= 0:
+        save_points(data)
+        return False
+    record["points"] -= 1
+    save_points(data)
+    return True
+
+
+def register_referral(referrer_id: int, new_user_id: int) -> bool:
+    """Credits REFERRAL_POINTS to referrer_id the first time new_user_id
+    starts the bot via their referral link. Returns True if credited (i.e.
+    this is genuinely the first time this new user has been referred, and
+    they aren't referring themselves)."""
+    if referrer_id == new_user_id:
+        return False
+    data = load_points()
+    new_record = _get_or_init_record(new_user_id, data)
+    if new_record.get("referred_by") is not None:
+        save_points(data)
+        return False
+    new_record["referred_by"] = referrer_id
+    referrer_record = _get_or_init_record(referrer_id, data)
+    referrer_record["points"] += REFERRAL_POINTS
+    referrer_record["referral_count"] = referrer_record.get("referral_count", 0) + 1
+    save_points(data)
+    return True
+
+
+def grant_premium(user_id: int, days: int):
+    """Admin-only action: activates (or extends) Premium for user_id by the
+    given number of days from now, or from their current expiry if they
+    already have active Premium (so re-topping up doesn't waste time)."""
+    data = load_points()
+    record = _get_or_init_record(user_id, data)
+    now = time.time()
+    base = max(record.get("premium_until") or 0, now)
+    record["premium_until"] = base + days * 86400
+    save_points(data)
+
+
+def is_premium(user_id: int) -> bool:
+    data = load_points()
+    record = _get_or_init_record(user_id, data)
+    save_points(data)
+    until = record.get("premium_until")
+    return bool(until and until > time.time())
+
+
+def premium_days_left(user_id: int) -> int:
+    data = load_points()
+    record = _get_or_init_record(user_id, data)
+    save_points(data)
+    until = record.get("premium_until")
+    if not until or until <= time.time():
+        return 0
+    return int((until - time.time()) // 86400) + 1
+
+
+# ----------------------------------------------------------------------
 # HELPERS
 # ----------------------------------------------------------------------
 def is_supported_url(url: str) -> bool:
@@ -176,6 +346,122 @@ def join_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("✅ I've joined, check again", callback_data="check_join")],
         ]
     )
+
+
+def video_action_keyboard(source_url: str) -> InlineKeyboardMarkup:
+    """Two buttons shown under every video the bot sends: one to re-share
+    the original post link via Telegram's native share dialog, and one
+    pointing at the configured shopping offer (SHOPPING_OFFER_URL)."""
+    share_url = f"https://t.me/share/url?url={quote(source_url, safe='')}"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📤 Share Video", url=share_url),
+                InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
+            ]
+        ]
+    )
+
+
+def referral_link_for(user_id: int, bot_username: str) -> str:
+    return f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+
+async def send_referral_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the user their point balance, referral count, and personal
+    referral link — used by the '🎁 Refer & Earn' menu button, the /refer
+    command, and the inline 'Refer & Earn' button under /start."""
+    user_id = update.effective_user.id
+    bot_username = context.bot.username
+    link = referral_link_for(user_id, bot_username)
+    points = get_points(user_id)
+    referrals = get_referral_count(user_id)
+
+    text = (
+        "🎁 *Refer & Earn Points*\n\n"
+        f"🔗 Your referral link:\n`{link}`\n\n"
+        f"⭐ Your current points: *{points}*\n"
+        f"👥 Total referrals: *{referrals}*\n\n"
+        "📖 *How it works:*\n"
+        f"• 1 referral = *{REFERRAL_POINTS} points*\n"
+        "• 1 download = *1 point* spent\n\n"
+        "When a friend joins the bot using your link, you instantly get "
+        f"{REFERRAL_POINTS} points — good for {REFERRAL_POINTS} video/photo downloads."
+    )
+    await update.effective_message.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📤 Share this link",
+                        url=f"https://t.me/share/url?url={quote(link, safe='')}"
+                        f"&text={quote('🎬 Download any video or photo for free!', safe='')}",
+                    )
+                ]
+            ]
+        ),
+    )
+
+
+async def referral_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await send_referral_info(update, context)
+
+
+async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_referral_info(update, context)
+
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_premium(user_id):
+        days_left = premium_days_left(user_id)
+        await update.message.reply_text(
+            f"💎 You already have Premium — {days_left} day(s) left.\n"
+            "Unlimited downloads, no points needed."
+        )
+        return
+
+    await update.message.reply_text(
+        "💎 *Get Premium — Unlimited Downloads*\n\n"
+        f"Price: *{PREMIUM_PRICE_LABEL}*\n"
+        f"Payment: {PREMIUM_PAYMENT_INFO}\n\n"
+        "After paying, send a screenshot of the payment along with your "
+        "Telegram username (or this chat's numeric ID) to our support bot "
+        "below — Premium will be activated once it's verified.\n\n"
+        f"👉 {BOT_SERVICE_LINK}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def addpremium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /addpremium <user_id> [days] — run this after manually
+    verifying a bKash/Nagad payment."""
+    if update.effective_user.id != ADMIN_ID:
+        return  # silently ignore non-admins
+
+    if not context.args:
+        await update.message.reply_text(f"Usage: /addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]")
+        return
+
+    try:
+        target_id = int(context.args[0])
+        days = int(context.args[1]) if len(context.args) > 1 else PREMIUM_DAYS_DEFAULT
+    except ValueError:
+        await update.message.reply_text(f"Usage: /addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]")
+        return
+
+    grant_premium(target_id, days)
+    await update.message.reply_text(f"✅ Premium granted to {target_id} for {days} day(s).")
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"🎉 Your Premium is now active for {days} day(s) — unlimited downloads, no points needed!",
+        )
+    except TelegramError:
+        pass  # user may have blocked the bot — safe to ignore
 
 
 async def is_subscribed(bot, user_id: int) -> bool:
@@ -494,9 +780,10 @@ def download_media(url: str, download_dir: str) -> tuple:
 # ----------------------------------------------------------------------
 # SENDING DOWNLOADED FILES BACK
 # ----------------------------------------------------------------------
-async def send_downloaded_file(update: Update, file_path: str, caption: str = ""):
+async def send_downloaded_file(update: Update, file_path: str, caption: str = "", source_url: str = ""):
     """Sends a single downloaded file back as a photo, audio, or video,
-    using the original post's caption when one was found."""
+    using the original post's caption/title when one was found. Videos get
+    the Share/Shopping button row attached directly to the message."""
     ext = os.path.splitext(file_path)[1].lower()
 
     with open(file_path, "rb") as f:
@@ -513,21 +800,29 @@ async def send_downloaded_file(update: Update, file_path: str, caption: str = ""
                 supports_streaming=True,
                 read_timeout=120,
                 write_timeout=120,
+                reply_markup=video_action_keyboard(source_url) if source_url else None,
             )
 
 
-async def send_downloaded_files(update: Update, file_paths: list, caption: str = ""):
+async def send_downloaded_files(update: Update, file_paths: list, caption: str = "", source_url: str = ""):
     """Sends one or many downloaded files. Multiple photos/videos from the
     same post (e.g. a carousel) go out together as an album, and carry the
-    original post's caption on the first item when one was found."""
+    original post's caption on the first item when one was found.
+
+    Telegram doesn't allow an inline keyboard on individual items inside a
+    media group, so when the batch includes any video, the Share/Shopping
+    buttons go out as a small follow-up message instead."""
     if len(file_paths) == 1:
-        await send_downloaded_file(update, file_paths[0], caption)
+        await send_downloaded_file(update, file_paths[0], caption, source_url)
         return
 
     # Telegram albums can only hold photos+videos together (not audio mixed
     # in), and at most 10 items per album — send any audio separately.
     album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
     audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
+    has_video = any(
+        os.path.splitext(p)[1].lower() not in IMAGE_EXTENSIONS | AUDIO_EXTENSIONS for p in album_paths
+    )
 
     for batch_start in range(0, len(album_paths), 10):
         batch = album_paths[batch_start : batch_start + 10]
@@ -551,6 +846,9 @@ async def send_downloaded_files(update: Update, file_paths: list, caption: str =
         for f in opened_files:
             f.close()
 
+    if has_video and source_url:
+        await update.message.reply_text("🎬", reply_markup=video_action_keyboard(source_url))
+
     for path in audio_paths:
         await send_downloaded_file(update, path, caption)
 
@@ -560,18 +858,58 @@ async def send_downloaded_files(update: Update, file_paths: list, caption: str =
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    is_new_user = user_id not in load_users()
     save_user(user_id)
 
     if not await is_subscribed(context.bot, user_id):
         await send_join_prompt(update)
         return
 
+    # Referral deep-link: /start ref_<referrer_id> — only counts the first
+    # time this user has ever started the bot, so re-running /start later
+    # (or a referral link pointing at an existing user) never double-credits.
+    if is_new_user and context.args:
+        payload = context.args[0]
+        if payload.startswith("ref_"):
+            try:
+                referrer_id = int(payload[4:])
+            except ValueError:
+                referrer_id = None
+            if referrer_id and register_referral(referrer_id, user_id):
+                try:
+                    await context.bot.send_message(
+                        chat_id=referrer_id,
+                        text=(
+                            "🎉 A new user joined the bot using your referral link!\n"
+                            f"+{REFERRAL_POINTS} points have been added to your account."
+                        ),
+                    )
+                except TelegramError:
+                    pass  # referrer may have blocked the bot — safe to ignore
+
+    points = get_points(user_id)
     await update.message.reply_text(
-        "👋 Welcome!\n\n"
-        "Send me any video, photo, or audio link from YouTube, Facebook, Instagram, "
-        "TikTok, and more — I'll download it automatically and send it right back to you.\n\n"
-        f"⚠️ Note: Telegram bots can only send files up to {MAX_FILESIZE_MB}MB.",
+        "👋 Welcome to KB Downloader!\n\n"
+        "📥 Send me any video, photo, or audio link from:\n"
+        "▶️ YouTube • Facebook • Instagram • TikTok • and more\n\n"
+        "⚡ I'll automatically download it and send the file back to you!\n\n"
+        f"⭐ Your current points: {points} (each download uses 1 point)\n"
+        f"🎁 Refer a friend to earn +{REFERRAL_POINTS} points per referral!\n\n"
+        f"⚠️ File Limit: Telegram bots can send files up to {MAX_FILESIZE_MB}MB only.\n\n"
+        "🚀 Just send a link to get started!",
         reply_markup=MAIN_MENU,
+    )
+    await update.message.reply_text(
+        "👇 Check these out:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
+                    InlineKeyboardButton(BOT_SERVICE_LABEL, url=BOT_SERVICE_LINK),
+                ],
+                [InlineKeyboardButton("🎁 Refer & Earn Points", callback_data="show_referral")],
+            ]
+        ),
     )
 
 
@@ -580,7 +918,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🆘 Need Any Help?\n\n"
         "Need help or facing any issue?\n"
         "👉 Join our Help Bot:\n"
-        "https://t.me/KbBotService\n\n"
+        f"{BOT_SERVICE_LINK}\n\n"
         "💬 Send your issue and get help.",
         reply_markup=MAIN_MENU,
     )
@@ -714,6 +1052,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📢 Our Channel":
         await update.message.reply_text(f"📢 Join our channel: {FORCE_SUB_CHANNEL_LINK}")
         return
+    if text == "🎁 Refer & Earn":
+        await send_referral_info(update, context)
+        return
+    if text == "💎 Premium":
+        await premium_command(update, context)
+        return
 
     if not await is_subscribed(context.bot, user_id):
         await send_join_prompt(update)
@@ -729,6 +1073,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_supported_url(url):
         await update.message.reply_text(
             "Sorry, this site isn't supported yet. Tap 📋 Supported Sites below to see the full list."
+        )
+        return
+
+    if not has_points(user_id):
+        bot_username = context.bot.username
+        link = referral_link_for(user_id, bot_username)
+        await update.message.reply_text(
+            "❌ You're out of points, so you can't download right now.\n\n"
+            f"🎁 Share your link below — when a friend joins, you get "
+            f"+{REFERRAL_POINTS} points ({REFERRAL_POINTS} free downloads)!\n\n"
+            f"🔗 `{link}`\n\n"
+            "💎 Or get unlimited downloads with Premium — tap 💎 Premium in the menu.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(
+                    "📤 Share & Earn Points",
+                    url=f"https://t.me/share/url?url={quote(link, safe='')}",
+                )]]
+            ),
         )
         return
 
@@ -763,7 +1126,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             await status_msg.edit_text("📤 Uploading...")
-            await send_downloaded_files(update, fitting_paths, caption)
+            try:
+                await send_downloaded_files(update, fitting_paths, caption, url)
+            except TelegramError as e:
+                # Telegram's own cloud API server hard-rejects uploads over
+                # 50MB regardless of MAX_FILESIZE_MB — this is the friendly
+                # message for that case (as opposed to other Telegram errors).
+                msg = str(e).lower()
+                if "entity too large" in msg or "too big" in msg or "file is too big" in msg:
+                    await status_msg.edit_text(
+                        "❌ This file is bigger than Telegram's own 50MB upload limit. "
+                        "Sending anything larger for real requires a Local Bot API Server — "
+                        "let me know if you'd like that set up."
+                    )
+                    return
+                raise
+            deduct_point(user_id)
             if skipped:
                 await update.message.reply_text(
                     f"⚠️ {skipped} item(s) from this post were skipped — over the {MAX_FILESIZE_MB}MB limit."
@@ -788,12 +1166,16 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
+    app.add_handler(CommandHandler("refer", refer_command))
+    app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("addpremium", addpremium_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(
         MessageHandler(filters.CaptionRegex(BROADCAST_CAPTION_RE), broadcast_command)
     )
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
+    app.add_handler(CallbackQueryHandler(referral_callback, pattern="^show_referral$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot started...")
