@@ -40,17 +40,16 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 MAX_FILESIZE_MB = int(os.environ.get("MAX_FILESIZE_MB", "100"))
 
-LOCAL_BOT_API_BASE_URL = os.environ.get("LOCAL_BOT_API_BASE_URL", "")
-LOCAL_BOT_API_BASE_FILE_URL = os.environ.get("LOCAL_BOT_API_BASE_FILE_URL", "")
-
 SHOPPING_OFFER_LABEL = os.environ.get("SHOPPING_OFFER_LABEL", "🛒 Amazon Flipkart Offer")
 SHOPPING_OFFER_URL = os.environ.get("SHOPPING_OFFER_URL", FORCE_SUB_CHANNEL_LINK)
 
 BOT_SERVICE_LABEL = os.environ.get("BOT_SERVICE_LABEL", "🤖 Our Bot Service")
 BOT_SERVICE_LINK = os.environ.get("BOT_SERVICE_LINK", "https://t.me/KbBotService")
 
-# Premium contact
+# Premium settings
+PREMIUM_PRICE_LABEL = os.environ.get("PREMIUM_PRICE_LABEL", "₹20 / month")
 PREMIUM_CONTACT = "@share_kb"
+PREMIUM_DAYS_DEFAULT = int(os.environ.get("PREMIUM_DAYS_DEFAULT", "30"))
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -62,15 +61,6 @@ USERS_FILE = os.path.join(DATA_DIR, "users.json")
 STARTER_POINTS = int(os.environ.get("STARTER_POINTS", "3"))
 REFERRAL_POINTS = int(os.environ.get("REFERRAL_POINTS", "10"))
 POINTS_FILE = os.path.join(DATA_DIR, "points.json")
-
-# ----------------------------------------------------------------------
-# PREMIUM
-# ----------------------------------------------------------------------
-PREMIUM_PRICE_LABEL = os.environ.get("PREMIUM_PRICE_LABEL", "₹50 / month")
-PREMIUM_PAYMENT_INFO = os.environ.get(
-    "PREMIUM_PAYMENT_INFO", "UPI: yourname@upi (Google Pay / PhonePe / Paytm)"
-)
-PREMIUM_DAYS_DEFAULT = int(os.environ.get("PREMIUM_DAYS_DEFAULT", "30"))
 
 SAVERAPI_KEY = os.environ.get("SAVERAPI_KEY", "")
 
@@ -271,13 +261,33 @@ def is_supported_url(url: str) -> bool:
     return any(domain in url.lower() for domain in SUPPORTED_DOMAINS)
 
 def supported_sites_text() -> str:
-    lines = ["📋 *Supported Sites:*\n"]
-    for name in SUPPORTED_SITES:
-        lines.append(f"✅ {name}")
-    lines.append(
-        "\n⚠️ Spotify and Apple Music are not supported because they use DRM protection."
+    return (
+        "*📋 SUPPORTED SITES*\n\n"
+        "Our downloader currently supports the following platforms:\n\n"
+        "▶️ YouTube\n"
+        "📘 Facebook\n"
+        "📸 Instagram\n"
+        "🎵 TikTok\n"
+        "𝕏 Twitter / X\n"
+        "👽 Reddit\n"
+        "📌 Pinterest\n"
+        "🎬 Vimeo\n"
+        "🎮 Twitch (Clips)\n"
+        "🌐 VK\n"
+        "🟢 OK.ru\n"
+        "📝 Tumblr\n"
+        "💜 Likee\n"
+        "🎧 SoundCloud\n"
+        "🧵 Threads\n"
+        "📺 Dailymotion\n"
+        "👻 Snapchat\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "*⚠️ NOT SUPPORTED*\n\n"
+        "🔒 Spotify\n"
+        "🍎 Apple Music\n\n"
+        "These platforms are currently not supported due to DRM protection.\n\n"
+        "✨ More platforms may be added in the future!"
     )
-    return "\n".join(lines)
 
 def join_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -308,14 +318,14 @@ async def send_referral_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
     points = get_points(user_id)
     referrals = get_referral_count(user_id)
     text = (
-        "🎁 *Refer & Earn Points*\n\n"
+        "*🎁 Refer & Earn Points*\n\n"
         f"🔗 Your referral link:\n`{link}`\n\n"
         f"⭐ Your current points: *{points}*\n"
         f"👥 Total referrals: *{referrals}*\n\n"
-        "📖 *How it works:*\n"
+        "*How it works:*\n"
         f"• 1 referral = *{REFERRAL_POINTS} points*\n"
         "• 1 download = *1 point*\n\n"
-        f"When a friend joins using your link, you get {REFERRAL_POINTS} points instantly."
+        f"When a friend joins using your link, you get *{REFERRAL_POINTS} points* instantly."
     )
     await update.effective_message.reply_text(
         text,
@@ -342,32 +352,40 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     if is_premium(user_id):
         days_left = premium_days_left(user_id)
-        await update.message.reply_text(
-            f"💎 You already have Premium — *{days_left}* day(s) left.\n"
-            "Unlimited downloads, no points needed.",
-            parse_mode=ParseMode.MARKDOWN,
+        text = (
+            f"*💎 You already have Premium!*\n\n"
+            f"*Remaining Days:* {days_left} day(s)\n\n"
+            f"*Unlimited downloads* — no points needed.\n\n"
+            f"For any problem contact: *{PREMIUM_CONTACT}*"
         )
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         return
 
-    await update.message.reply_text(
-        "💎 *Get Premium — Unlimited Downloads*\n\n"
-        f"Price: *{PREMIUM_PRICE_LABEL}*\n"
-        f"Payment: {PREMIUM_PAYMENT_INFO}\n\n"
-        "After payment, contact us here to activate Premium:\n"
-        f"👉 {PREMIUM_CONTACT}\n\n"
-        "Send payment screenshot + your Telegram username or User ID.",
-        parse_mode=ParseMode.MARKDOWN,
+    text = (
+        "*💎 Get Premium — Unlimited Downloads*\n\n"
+        "*About this Bot:*\n"
+        "Download videos & photos from YouTube, Facebook, Instagram, TikTok and many more sites easily.\n\n"
+        f"*Premium Price:* Only *{PREMIUM_PRICE_LABEL}*\n\n"
+        "*Benefits:*\n"
+        "✅ Unlimited downloads\n"
+        "✅ No points required\n"
+        "✅ Priority support\n\n"
+        f"*To buy Premium contact:*\n*{PREMIUM_CONTACT}*\n\n"
+        "Send payment screenshot + your Telegram username or User ID.\n\n"
+        f"For any problem contact: *{PREMIUM_CONTACT}*"
     )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def addpremium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args:
         await update.message.reply_text(
-            f"Usage:\n`/addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]`\n\n"
-            f"Example:\n`/addpremium 123456789 30`",
+            f"*Usage:*\n`/addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]`\n\n"
+            f"*Example:*\n`/addpremium 123456789 30`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -376,16 +394,24 @@ async def addpremium_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         days = int(context.args[1]) if len(context.args) > 1 else PREMIUM_DAYS_DEFAULT
     except ValueError:
         await update.message.reply_text(
-            f"Usage:\n`/addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]`",
+            f"*Usage:*\n`/addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
     grant_premium(target_id, days)
-    await update.message.reply_text(f"✅ Premium granted to {target_id} for {days} day(s).")
+    await update.message.reply_text(
+        f"✅ Premium granted to `{target_id}` for *{days}* day(s).",
+        parse_mode=ParseMode.MARKDOWN,
+    )
     try:
         await context.bot.send_message(
             chat_id=target_id,
-            text=f"🎉 Your Premium is now active for {days} day(s)!\nUnlimited downloads unlocked.",
+            text=(
+                f"*🎉 Your Premium is now active for {days} day(s)!*\n"
+                f"Unlimited downloads unlocked.\n\n"
+                f"For any problem contact: *{PREMIUM_CONTACT}*"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
         )
     except TelegramError:
         pass
@@ -400,10 +426,10 @@ async def is_subscribed(bot, user_id: int) -> bool:
 
 async def send_join_prompt(update: Update):
     text = (
-        "⚠️ You need to join our channel before using this bot.\n\n"
+        "*⚠️ You need to join our channel before using this bot.*\n\n"
         "Tap the button below to join, then tap \"I've joined, check again\"."
     )
-    await update.message.reply_text(text, reply_markup=join_keyboard())
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=join_keyboard())
 
 # ----------------------------------------------------------------------
 # DOWNLOAD LOGIC
@@ -702,11 +728,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_new_user = user_id not in load_users()
     save_user(user_id)
 
-    # Admin gets Admin Menu
     if user_id == ADMIN_ID:
         await update.message.reply_text(
-            "👑 *Admin Panel*\n\n"
-            "Choose an option from the menu below.",
+            "*👑 Admin Panel*\n\nChoose an option from the menu below.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=ADMIN_MENU,
         )
@@ -727,17 +751,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=referrer_id,
-                        text=(
-                            "🎉 A new user joined using your referral link!\n"
-                            f"+{REFERRAL_POINTS} points have been added to your account."
-                        ),
+                        text=f"*🎉 A new user joined using your referral link!*\n+{REFERRAL_POINTS} points added.",
+                        parse_mode=ParseMode.MARKDOWN,
                     )
                 except TelegramError:
                     pass
 
     points = get_points(user_id)
     await update.message.reply_text(
-        "👋 Welcome to *KB Downloader*!\n\n"
+        "*👋 Welcome to KB Downloader!*\n\n"
         "📥 Send me any video, photo or audio link from:\n"
         "▶️ YouTube • Facebook • Instagram • TikTok and more\n\n"
         "⚡ I will automatically download and send the file back to you!\n\n"
@@ -763,9 +785,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🆘 *Need Help?*\n\n"
-        "If you are facing any issue, contact our support:\n"
-        f"👉 {BOT_SERVICE_LINK}\n\n"
+        "*🆘 Need Help?*\n\n"
+        f"If you are facing any issue, contact:\n*{PREMIUM_CONTACT}*\n\n"
         "Describe your problem and we will help you.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=MAIN_MENU,
@@ -774,9 +795,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id == ADMIN_ID:
-        await update.message.reply_text("👑 Admin Menu:", reply_markup=ADMIN_MENU)
+        await update.message.reply_text("*👑 Admin Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
     else:
-        await update.message.reply_text("🏠 Main Menu:", reply_markup=MAIN_MENU)
+        await update.message.reply_text("*🏠 Main Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -785,7 +806,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points_data = load_points()
     premium_count = sum(1 for uid, rec in points_data.items() if rec.get("premium_until", 0) > time.time())
     await update.message.reply_text(
-        f"📊 *Bot Status*\n\n"
+        f"*📊 Bot Status*\n\n"
         f"👥 Total Users: *{len(users)}*\n"
         f"💎 Active Premium: *{premium_count}*\n"
         f"⭐ Starter Points: {STARTER_POINTS}\n"
@@ -823,10 +844,10 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not source_message and not text:
         await update.message.reply_text(
-            "📢 *How to Broadcast:*\n\n"
+            "*📢 How to Broadcast:*\n\n"
             "1. Reply to any message with `/broadcast`\n"
             "2. Or type `/broadcast Your message here`\n"
-            "3. Or send a photo/video with caption `/broadcast Your caption`",
+            "3. Or send photo/video with caption `/broadcast Your caption`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=ADMIN_MENU,
         )
@@ -889,14 +910,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "👥 Total Users":
             users = load_users()
             await update.message.reply_text(
-                f"👥 Total Users: *{len(users)}*",
+                f"*👥 Total Users:* {len(users)}",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=ADMIN_MENU,
             )
             return
         if text == "📢 Broadcast":
             await update.message.reply_text(
-                "📢 *How to Broadcast:*\n\n"
+                "*📢 How to Broadcast:*\n\n"
                 "1. Reply to any message with `/broadcast`\n"
                 "2. Or type `/broadcast Your message here`\n"
                 "3. Or send photo/video with caption `/broadcast Your caption`",
@@ -906,10 +927,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if text == "💎 Give Premium":
             await update.message.reply_text(
-                "💎 *Give Premium:*\n\n"
+                "*💎 Give Premium:*\n\n"
                 "`/addpremium <user_id> [days]`\n\n"
-                "Example:\n"
-                "`/addpremium 123456789 30`\n\n"
+                "*Example:*\n`/addpremium 123456789 30`\n\n"
                 "Default is 30 days.",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=ADMIN_MENU,
@@ -917,9 +937,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if text == "ℹ️ How to Give Premium":
             await update.message.reply_text(
-                "ℹ️ *How to Give Premium:*\n\n"
+                "*ℹ️ How to Give Premium:*\n\n"
                 "1. User pays and sends payment screenshot\n"
-                "2. Get their Telegram User ID (they can get it from @userinfobot)\n"
+                "2. Get their Telegram User ID (from @userinfobot)\n"
                 "3. Run this command:\n"
                 "`/addpremium 123456789 30`\n\n"
                 "→ 123456789 = User ID\n"
@@ -930,7 +950,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if text == "🔙 User Menu":
-            await update.message.reply_text("🏠 Switched to User Menu:", reply_markup=MAIN_MENU)
+            await update.message.reply_text("*🏠 Switched to User Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
             return
 
     # ---------- NORMAL USER BUTTONS ----------
@@ -944,7 +964,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
     if text == "📢 Our Channel":
-        await update.message.reply_text(f"📢 Our Channel: {FORCE_SUB_CHANNEL_LINK}")
+        await update.message.reply_text(f"*📢 Our Channel:* {FORCE_SUB_CHANNEL_LINK}", parse_mode=ParseMode.MARKDOWN)
         return
     if text == "🎁 Refer & Earn":
         await send_referral_info(update, context)
@@ -953,20 +973,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await premium_command(update, context)
         return
 
-    # Force subscribe check
     if not await is_subscribed(context.bot, user_id):
         await send_join_prompt(update)
         return
 
     match = URL_REGEX.search(text)
     if not match:
-        await update.message.reply_text("Please send a valid video or photo link.")
+        await update.message.reply_text("*Please send a valid video or photo link.*", parse_mode=ParseMode.MARKDOWN)
         return
 
     url = match.group(1)
     if not is_supported_url(url):
         await update.message.reply_text(
-            "Sorry, this site is not supported yet.\nTap 📋 Supported Sites to see the full list."
+            "*Sorry, this site is not supported yet.*\nTap 📋 Supported Sites to see the full list.",
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 
@@ -974,10 +994,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_username = context.bot.username
         link = referral_link_for(user_id, bot_username)
         await update.message.reply_text(
-            "❌ You are out of points.\n\n"
-            f"🎁 Share your referral link — when a friend joins you get +{REFERRAL_POINTS} points!\n\n"
+            "*❌ You are out of points.*\n\n"
+            f"*🎁 Share your referral link* — when a friend joins you get +{REFERRAL_POINTS} points!\n\n"
             f"🔗 `{link}`\n\n"
-            f"💎 Or buy Premium for unlimited downloads.\nContact: {PREMIUM_CONTACT}",
+            f"*💎 Or buy Premium for unlimited downloads.*\n"
+            f"Contact: *{PREMIUM_CONTACT}*",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(
@@ -1001,7 +1022,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not file_paths:
                 await status_msg.edit_text(
-                    "❌ Could not download this media.\n\n"
+                    "*❌ Could not download this media.*\n\n"
                     "Possible reasons:\n"
                     "• Video is Private / Age-restricted\n"
                     "• Link is invalid or deleted\n"
@@ -1017,7 +1038,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not fitting_paths:
                 await status_msg.edit_text(
-                    f"❌ This file is larger than {MAX_FILESIZE_MB}MB limit."
+                    f"*❌ This file is larger than {MAX_FILESIZE_MB}MB limit.*"
                 )
                 return
 
@@ -1029,7 +1050,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = str(e).lower()
                 if "entity too large" in msg or "too big" in msg or "file is too big" in msg:
                     await status_msg.edit_text(
-                        "❌ File is larger than Telegram's 50MB upload limit.\n"
+                        "*❌ File is larger than Telegram's 50MB upload limit.*\n"
                         "To send bigger files you need a Local Bot API Server."
                     )
                     return
