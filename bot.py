@@ -375,7 +375,7 @@ async def send_join_prompt(update: Update):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=join_keyboard())
 
 # ----------------------------------------------------------------------
-# DOWNLOAD LOGIC - Improved for Instagram Photos & Albums
+# DOWNLOAD LOGIC
 # ----------------------------------------------------------------------
 SAVERAPI_ENDPOINT = "https://saverapi.net/api/all-in-one-downloader-api"
 
@@ -422,7 +422,6 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
 
     caption = _clean_caption(data.get("caption") or data.get("title") or "")
 
-    # Handle different response formats for albums/photos
     items = []
     if data.get("medias"):
         items = data["medias"]
@@ -439,11 +438,10 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
         return [], ""
 
     files = []
-    for i, item in enumerate(items[:12]):  # Instagram albums can have up to 10-12 items
+    for i, item in enumerate(items[:12]):
         media_url = item.get("url") or item.get("download_url") or item.get("src")
         if not media_url:
             continue
-
         media_type = (item.get("type") or item.get("media_type") or "").lower()
         try:
             r = requests.get(media_url, headers=HTTP_HEADERS, timeout=60)
@@ -451,7 +449,6 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
         except Exception:
             continue
 
-        # Decide extension
         content_type = r.headers.get("Content-Type", "").lower()
         if "video" in media_type or "video" in content_type or media_url.endswith((".mp4", ".mov")):
             ext = ".mp4"
@@ -471,7 +468,6 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
 
 def _ytdlp_download(url: str, download_dir: str) -> tuple:
     outtmpl = os.path.join(download_dir, "%(autonumber)03d_%(title).60s.%(ext)s")
-
     ydl_opts = {
         "outtmpl": outtmpl,
         "format": f"best[filesize<{MAX_FILESIZE_MB}M]/best",
@@ -486,7 +482,6 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
             "youtube": {"player_client": ["android", "web", "tv"]},
         },
     }
-
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 50:
         ydl_opts["cookiefile"] = COOKIES_FILE
 
@@ -500,7 +495,6 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
         raise
 
     caption = _clean_caption(info.get("title") or info.get("description") or "")
-
     files = sorted(
         os.path.join(download_dir, name)
         for name in os.listdir(download_dir)
@@ -509,7 +503,6 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
     return files, caption
 
 def _fallback_scrape(url: str, download_dir: str) -> tuple:
-    """Improved fallback especially for Instagram photos/albums"""
     cookies = None
     if os.path.exists(COOKIES_FILE):
         try:
@@ -537,7 +530,6 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
         logger.error(f"Fallback request failed: {e}")
         return [], ""
 
-    # Extract all possible image/video URLs
     media_urls = []
     patterns = [
         r'"display_url":"([^"]+)"',
@@ -545,7 +537,6 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
         r'property="og:image" content="([^"]+)"',
         r'property="og:video" content="([^"]+)"',
         r'"url":"(https://[^"]+\.(?:jpg|jpeg|png|webp|mp4)[^"]*)"',
-        r'srcset="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
     ]
     for pattern in patterns:
         found = re.findall(pattern, html)
@@ -554,7 +545,6 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
             if u.startswith("http") and u not in media_urls:
                 media_urls.append(u)
 
-    # Caption
     caption = ""
     cap_match = re.search(r'"edge_media_to_caption":\{"edges":\[\{"node":\{"text":"([^"]+)"', html)
     if cap_match:
@@ -588,19 +578,16 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
             files.append(path)
         except Exception:
             continue
-
     return files, caption
 
 def download_media(url: str, download_dir: str) -> tuple:
     url = _resolve_redirect(url)
 
-    # 1. SaverAPI first (best for Instagram photos + albums)
     files, caption = _saverapi_download(url, download_dir)
     if files:
         logger.info(f"[{url}] SaverAPI success: {len(files)} file(s)")
         return files, caption
 
-    # 2. yt-dlp
     try:
         files, caption = _ytdlp_download(url, download_dir)
         if files:
@@ -611,13 +598,11 @@ def download_media(url: str, download_dir: str) -> tuple:
         if "private" in str(e).lower() or "login" in str(e).lower():
             raise
 
-    # 3. Fallback scrape (improved for Instagram)
     files, caption = _fallback_scrape(url, download_dir)
     if files:
         logger.info(f"[{url}] Fallback success: {len(files)} file(s)")
     else:
         logger.error(f"[{url}] All methods failed")
-
     return files, caption
 
 # ----------------------------------------------------------------------
@@ -644,7 +629,6 @@ async def send_downloaded_files(update: Update, file_paths: list, caption: str =
 
     album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
     audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
-
     has_video = any(os.path.splitext(p)[1].lower() not in IMAGE_EXTENSIONS | AUDIO_EXTENSIONS for p in album_paths)
 
     for batch_start in range(0, len(album_paths), 10):
@@ -840,7 +824,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
     if text == "📢 Our Channel":
-        await update.message.reply_text(f"*📢 Our Channel:* {FORCE_SUB_CHANNEL_LINK}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "*📢 Our Official Channel*\n\n"
+            "Join our channel for updates, offers and support:\n\n"
+            "👉 https://t.me/KbBotService\n\n"
+            "Thank you for using our bot!",
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=False
+        )
         return
     if text == "🎁 Refer & Earn":
         await send_referral_info(update, context)
