@@ -5,6 +5,8 @@ import logging
 import tempfile
 import asyncio
 import time
+import subprocess
+import sys
 from urllib.parse import quote
 
 import requests
@@ -644,23 +646,165 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
     return files, caption
 
 
-def _fallback_scrape(url: str, download_dir: str) -> tuple:
-    """Last-resort fallback for posts yt-dlp's extractors don't handle well —
-    most commonly plain Facebook/Instagram photo posts. Fetches the page HTML
-    directly and pulls whatever og/twitter image or video tags it can find,
-    plus the page's og:title/og:description as the original caption.
+def _decode_instagram_url(raw: str) -> str:
+    """Decode escaped URLs commonly embedded in Instagram HTML/JSON."""
+    return (
+        raw.replace("\\/", "/")
+        .replace("\\u0026", "&")
+        .replace("\\u003D", "=")
+        .replace("\\u002F", "/")
+        .replace("&amp;", "&")
+    )
 
-    Note: this only works if requests.get() actually receives the real page
-    (not a login wall). Facebook and Instagram frequently serve a stripped
-    login page to logged-out / non-browser requests, in which case there is
-    no real og:image to find and this tier will legitimately return [] —
-    that's the scenario SaverAPI (see SAVERAPI_KEY above) is meant to cover.
+
+def _extract_instagram_media_urls(html: str) -> list:
+    """Extract real Instagram media URLs from embedded post JSON.
+
+    display_url/image_versions2 are preferred over og:image because og:image
+    is commonly a social-sharing preview rather than the post's original.
+    """
+    # Keep video URLs separate so a video post is never accidentally replaced
+    # by its thumbnail when the dedicated extractors fail.
+    video_urls = []
+    for pattern in (
+        r'"video_url"\s*:\s*"([^"]+)"',
+        r'"video_versions"\s*:\s*\[\s*\{[^}]*?"url"\s*:\s*"([^"]+)"',
+    ):
+        video_urls.extend(_decode_instagram_url(u) for u in re.findall(pattern, html))
+
+    image_urls = []
+    for pattern in (
+        r'"display_url"\s*:\s*"([^"]+)"',
+        r'"image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"',
+    ):
+        image_urls.extend(_decode_instagram_url(u) for u in re.findall(pattern, html))
+
+    # Prefer display_url results. If Instagram doesn't expose those, use the
+    # first image_versions2 candidates. De-duplicate while keeping carousel order.
+    def unique_http(values):
+        seen, out = set(), []
+        for u in values:
+            if u.startswith("http") and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
+    videos = unique_http(video_urls)
+    images = unique_http(image_urls)
+    return videos[:10] if videos else images[:10]
+
+
+def _download_direct_urls(media_urls: list, download_dir: str) -> list:
+    """Download direct media URLs and determine the real file type."""
+    files = []
+    for i, media_url in enumerate(media_urls[:10]):
+        try:
+            r = requests.get(
+                media_url,
+                headers={**HTTP_HEADERS, "Referer": "https://www.instagram.com/"},
+                timeout=45,
+                stream=True,
+            )
+            r.raise_for_status()
+            content_type = (r.headers.get("Content-Type") or "").lower()
+            if "video" in content_type:
+                ext = ".mp4"
+            elif "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            elif "gif" in content_type:
+                ext = ".gif"
+            else:
+                ext = ".jpg"
+            path = os.path.join(download_dir, f"{i:03d}_instagram{ext}")
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            files.append(path)
+        except requests.RequestException as e:
+            logger.warning(f"Direct Instagram media download failed: {e}")
+        except OSError as e:
+            logger.warning(f"Could not save Instagram media: {e}")
+    return files
+
+
+def _gallerydl_download(url: str, download_dir: str) -> tuple:
+    """Use gallery-dl for Instagram photos and image/video carousels.
+
+    Current yt-dlp releases can recognize Instagram image-only carousels but
+    still fail with 'No video formats found'. gallery-dl has a dedicated
+    Instagram image extractor, so it is the primary Instagram photo tier.
+    """
+    if "instagram.com" not in url.lower():
+        return [], ""
+
+    try:
+        import gallery_dl  # noqa: F401
+    except ImportError:
+        logger.warning("gallery-dl is not installed; skipping Instagram photo extractor.")
+        return [], ""
+
+    cmd = [
+        sys.executable, "-m", "gallery_dl",
+        "--quiet", "--no-mtime",
+        "--directory", download_dir,
+        "--filename", "{num:03d}_{filename}.{extension}",
+        "-o", "extractor.instagram.previews=false",
+        "-o", "extractor.instagram.videos=true",
+        "-o", "extractor.instagram.include=posts",
+        "-o", "extractor.instagram.order-files=asc",
+        "-o", "extractor.instagram.order-posts=asc",
+    ]
+    if os.path.exists(COOKIES_FILE):
+        cmd += ["--cookies", COOKIES_FILE]
+    cmd.append(url)
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=180, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning(f"[{url}] gallery-dl could not run: {e}")
+        return [], ""
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        logger.warning(
+            f"[{url}] gallery-dl failed (code {result.returncode}): {detail[-1200:]}"
+        )
+        return [], ""
+
+    files = []
+    for root, _, names in os.walk(download_dir):
+        for name in names:
+            if name.lower().endswith(SKIP_EXTENSIONS):
+                continue
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                files.append(path)
+    files.sort()
+    if not files:
+        logger.warning(f"[{url}] gallery-dl finished but returned no media files.")
+        return [], ""
+
+    logger.info(f"[{url}] downloaded via gallery-dl: {len(files)} file(s)")
+    return files[:10], ""
+
+
+def _fallback_scrape(url: str, download_dir: str) -> tuple:
+    """Last-resort HTML fallback.
+
+    Instagram embedded media JSON is checked BEFORE og:image. This prevents
+    the bot from sending a social-sharing thumbnail when the actual post image
+    is available in the page data.
     """
     cookies = None
     if os.path.exists(COOKIES_FILE):
         try:
             jar = requests.cookies.RequestsCookieJar()
-            with open(COOKIES_FILE) as f:
+            with open(COOKIES_FILE, encoding="utf-8") as f:
                 for line in f:
                     if line.startswith("#") or not line.strip():
                         continue
@@ -673,19 +817,39 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
             logger.warning(f"Could not parse cookies for fallback scrape: {e}")
 
     try:
-        resp = requests.get(url, headers=HTTP_HEADERS, cookies=cookies, timeout=20)
+        resp = requests.get(url, headers=HTTP_HEADERS, cookies=cookies, timeout=25)
         resp.raise_for_status()
         html = resp.text
     except requests.RequestException as e:
         logger.error(f"Fallback scrape request failed: {e}")
         return [], ""
 
+    if "instagram.com" in url.lower():
+        instagram_urls = _extract_instagram_media_urls(html)
+        if instagram_urls:
+            files = _download_direct_urls(instagram_urls, download_dir)
+            if files:
+                caption_match = (
+                    re.search(r'<meta[^>]+property="og:description"[^>]+content="([^"]+)"', html)
+                    or re.search(r'<meta[^>]+content="([^"]+)"[^>]+property="og:description"', html)
+                )
+                raw_caption = caption_match.group(1) if caption_match else ""
+                caption = _clean_caption(
+                    raw_caption.replace("&amp;", "&")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", '"')
+                )
+                logger.info(
+                    f"[{url}] downloaded via Instagram embedded-media fallback: {len(files)} file(s)"
+                )
+                return files, caption
+
+    # Generic fallback for the other supported sites.
     media_urls = []
     for pattern in (
         r'<meta[^>]+property="og:video(?::url)?"[^>]+content="([^"]+)"',
         r'<meta[^>]+property="og:image(?::secure_url)?"[^>]+content="([^"]+)"',
         r'<meta[^>]+name="twitter:image"[^>]+content="([^"]+)"',
-        # Some pages emit content before property/name — cover that order too.
         r'<meta[^>]+content="([^"]+)"[^>]+property="og:image(?::secure_url)?"',
     ):
         media_urls += re.findall(pattern, html)
@@ -693,15 +857,15 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
     if not media_urls:
         logger.warning(f"Fallback scrape found no og/twitter media tags for {url} — likely a login wall.")
 
-    # og:description usually holds the post's own caption text; og:title is
-    # a weaker fallback (often just "Facebook" or the page name).
     caption_match = re.search(
         r'<meta[^>]+property="og:description"[^>]+content="([^"]+)"', html
     ) or re.search(
         r'<meta[^>]+content="([^"]+)"[^>]+property="og:description"', html
     )
     raw_caption = caption_match.group(1) if caption_match else ""
-    caption = _clean_caption(raw_caption.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"'))
+    caption = _clean_caption(
+        raw_caption.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"')
+    )
 
     seen, ordered = set(), []
     for u in media_urls:
@@ -717,39 +881,37 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
             r.raise_for_status()
         except requests.RequestException:
             continue
-
-        content_type = r.headers.get("Content-Type", "")
+        content_type = (r.headers.get("Content-Type") or "").lower()
         if "video" in content_type:
             ext = ".mp4"
         elif "png" in content_type:
             ext = ".png"
         elif "webp" in content_type:
             ext = ".webp"
+        elif "gif" in content_type:
+            ext = ".gif"
         else:
             ext = ".jpg"
-
         path = os.path.join(download_dir, f"{i:03d}_fallback{ext}")
         with open(path, "wb") as f:
             f.write(r.content)
         files.append(path)
-
     return files, caption
 
 
 def download_media(url: str, download_dir: str) -> tuple:
-    """Downloads a post and returns (files, original_caption).
+    """Download a post and return (files, original_caption).
 
-    Tries three approaches in order, each catching where the previous
-    leaves off:
-      1. SaverAPI.NET — the specialized service (if a key is configured),
-         which reliably handles Facebook photos, Instagram albums, etc.
-      2. yt-dlp — handles the vast majority of videos and some photo posts.
-      3. Direct page scraping — a last resort for whatever's left.
-
-    Every tier logs why it failed, so Railway logs will show exactly which
-    step a failing link is dying at.
+    Instagram: gallery-dl -> SaverAPI -> yt-dlp -> embedded JSON -> generic HTML.
+    Other sites: SaverAPI -> yt-dlp -> generic HTML, preserving the old flow.
     """
     url = _resolve_redirect(url)
+    is_instagram = "instagram.com" in url.lower()
+
+    if is_instagram:
+        files, caption = _gallerydl_download(url, download_dir)
+        if files:
+            return files, caption
 
     files, caption = _saverapi_download(url, download_dir)
     if files:
@@ -760,20 +922,16 @@ def download_media(url: str, download_dir: str) -> tuple:
         files, caption = _ytdlp_download(url, download_dir)
         if files:
             logger.info(f"[{url}] downloaded via yt-dlp: {len(files)} file(s)")
+            return files, caption
     except Exception as e:
-        # Broadened from yt_dlp.utils.DownloadError -> Exception: yt-dlp can
-        # raise other error types (e.g. ExtractorError) for photo-only posts
-        # it doesn't fully support, and those must not skip the fallback tier.
-        logger.warning(f"[{url}] yt-dlp failed, falling back to page scrape: {e}")
+        logger.warning(f"[{url}] yt-dlp failed, moving to fallback: {e}")
         files, caption = [], ""
 
-    if not files:
-        files, caption = _fallback_scrape(url, download_dir)
-        if files:
-            logger.info(f"[{url}] downloaded via fallback scrape: {len(files)} file(s)")
-        else:
-            logger.error(f"[{url}] all three download tiers failed.")
-
+    files, caption = _fallback_scrape(url, download_dir)
+    if files:
+        logger.info(f"[{url}] downloaded via fallback scrape: {len(files)} file(s)")
+    else:
+        logger.error(f"[{url}] all download tiers failed.")
     return files, caption
 
 
