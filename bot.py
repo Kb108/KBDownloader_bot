@@ -75,7 +75,7 @@ else:
             pass
     print("⚠️ SITE_COOKIES is not set.")
 
-URL_REGEX = re.compile(r"(https?://\S+)", re.IGNORECASE)
+URL_REGEX = re.compile(r"(https?://[^\s<>\[\]{}]+)", re.IGNORECASE)
 
 SUPPORTED_SITES = {
     "YouTube": ["youtube.com", "youtu.be"],
@@ -403,8 +403,14 @@ def _clean_caption(text) -> str:
 def _saverapi_download(url: str, download_dir: str) -> tuple:
     if not SAVERAPI_KEY:
         return [], ""
+
     try:
-        resp = requests.get(SAVERAPI_ENDPOINT, params={"url": url}, headers={"x-api-key": SAVERAPI_KEY}, timeout=40)
+        resp = requests.get(
+            SAVERAPI_ENDPOINT,
+            params={"url": url},
+            headers={"x-api-key": SAVERAPI_KEY, **HTTP_HEADERS},
+            timeout=45,
+        )
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -415,37 +421,70 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
         logger.warning(f"SaverAPI error: {data.get('error')}")
         return [], ""
 
-    caption = _clean_caption(data.get("caption") or data.get("title") or "")
+    caption = _clean_caption(
+        data.get("caption") or data.get("title") or data.get("description") or ""
+    )
 
-    items = data.get("medias") or data.get("items") or data.get("photos") or []
-    if not items and data.get("download_url"):
-        items = [{"url": data["download_url"], "type": data.get("type", "video")}]
-    if not items and data.get("url"):
-        items = [{"url": data["url"], "type": data.get("type", "image")}]
+    items = (
+        data.get("medias")
+        or data.get("items")
+        or data.get("photos")
+        or data.get("media")
+        or []
+    )
+
+    if isinstance(items, dict):
+        items = [items]
 
     if not items:
-        return [], ""
+        for key in ("download_url", "video_url", "image_url", "url"):
+            if data.get(key):
+                items = [{"url": data[key], "type": data.get("type", "image")}]
+                break
 
     files = []
     for i, item in enumerate(items[:12]):
-        media_url = item.get("url") or item.get("download_url") or item.get("src")
-        if not media_url:
+        if isinstance(item, str):
+            media_url = item
+            media_type = ""
+        else:
+            media_url = (
+                item.get("url")
+                or item.get("download_url")
+                or item.get("src")
+                or item.get("video_url")
+                or item.get("image_url")
+            )
+            media_type = str(item.get("type") or "").lower()
+
+        if not media_url or not str(media_url).startswith(("http://", "https://")):
             continue
-        media_type = (item.get("type") or "").lower()
+
         try:
-            r = requests.get(media_url, headers=HTTP_HEADERS, timeout=60)
+            r = requests.get(
+                media_url,
+                headers={**HTTP_HEADERS, "Referer": "https://www.instagram.com/"},
+                timeout=60,
+            )
             r.raise_for_status()
-            if len(r.content) < 10000:
+            if len(r.content) < 1000:
                 continue
-        except:
+        except Exception as e:
+            logger.warning(f"SaverAPI media download failed: {e}")
             continue
 
         content_type = r.headers.get("Content-Type", "").lower()
-        if "video" in media_type or "video" in content_type or media_url.endswith((".mp4", ".mov")):
+        lower_url = str(media_url).lower()
+
+        if (
+            "video" in media_type
+            or "video/" in content_type
+            or lower_url.split("?")[0].endswith((".mp4", ".mov", ".m4v", ".webm"))
+        ):
             ext = ".mp4"
-        elif "png" in content_type:
+        elif "png" in content_type or lower_url.split("?")[0].endswith(".png"):
             ext = ".png"
-        elif "webp" in content_type:
+        elif "webp" in content_type or lower_url.split("?")[0].endswith(".webp"):
             ext = ".webp"
         else:
             ext = ".jpg"
@@ -459,18 +498,39 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
 
 def _ytdlp_download(url: str, download_dir: str) -> tuple:
     outtmpl = os.path.join(download_dir, "%(autonumber)03d_%(title).60s.%(ext)s")
+
     ydl_opts = {
         "outtmpl": outtmpl,
-        "format": f"best[filesize<{MAX_FILESIZE_MB}M]/best",
+        "format": (
+            f"best[filesize<{MAX_FILESIZE_MB}M]/"
+            f"best[height<=2160][ext=mp4]/"
+            "best"
+        ),
         "quiet": True,
         "no_warnings": True,
-        "merge_output_format": "mp4",
+        "noplaylist": False,
         "playlistend": 12,
         "retries": 5,
         "fragment_retries": 5,
+        "file_access_retries": 3,
+        "socket_timeout": 30,
         "http_headers": HTTP_HEADERS,
-        "extractor_args": {"youtube": {"player_client": ["android", "web", "tv"]}},
+        "merge_output_format": "mp4",
+        "restrictfilenames": True,
     }
+
+    # Instagram sometimes needs a browser-like extractor configuration.
+    if "instagram.com" in url.lower():
+        ydl_opts["extractor_args"] = {
+            "instagram": {
+                "api": ["graphql", "web"],
+            }
+        }
+    else:
+        ydl_opts["extractor_args"] = {
+            "youtube": {"player_client": ["android", "web", "tv"]}
+        }
+
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 50:
         ydl_opts["cookiefile"] = COOKIES_FILE
 
@@ -479,20 +539,43 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
             info = ydl.extract_info(url, download=True) or {}
     except Exception as e:
         error_msg = str(e).lower()
-        if any(x in error_msg for x in ["private", "login", "age-restricted", "challenge"]):
-            raise Exception("This content requires login / is private. Update SITE_COOKIES.") from e
+        if any(
+            x in error_msg
+            for x in ["private", "login", "age-restricted", "challenge", "sign in"]
+        ):
+            raise Exception(
+                "This Instagram content requires login or is private. "
+                "Set valid SITE_COOKIES."
+            ) from e
         raise
 
-    caption = _clean_caption(info.get("title") or info.get("description") or "")
-    files = sorted([
-        os.path.join(download_dir, name)
-        for name in os.listdir(download_dir)
-        if not name.endswith(SKIP_EXTENSIONS)
-    ])
-    return files, caption
+    caption = _clean_caption(
+        info.get("title") or info.get("description") or info.get("caption") or ""
+    )
+
+    files = []
+    for name in os.listdir(download_dir):
+        path = os.path.join(download_dir, name)
+        if not os.path.isfile(path):
+            continue
+        if name.endswith(SKIP_EXTENSIONS):
+            continue
+        if os.path.getsize(path) < 1000:
+            continue
+        files.append(path)
+
+    return sorted(files), caption
 
 def _fallback_scrape(url: str, download_dir: str) -> tuple:
+    """
+    Last-resort Instagram downloader.
+
+    It first requests the page using browser-like headers and optional
+    SITE_COOKIES, then extracts JSON-LD/OpenGraph and common Instagram
+    media URLs. It deliberately avoids profile thumbnails.
+    """
     cookies = None
+
     if os.path.exists(COOKIES_FILE):
         try:
             jar = requests.cookies.RequestsCookieJar()
@@ -500,7 +583,7 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
                 for line in f:
                     if line.startswith("#") or not line.strip():
                         continue
-                    parts = line.strip().split("\t")
+                    parts = line.rstrip("\n").split("\t")
                     if len(parts) >= 7:
                         domain, _, path, _, _, name, value = parts[:7]
                         jar.set(name, value, domain=domain, path=path)
@@ -509,84 +592,192 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
             logger.warning(f"Cookie parse error: {e}")
 
     headers = HTTP_HEADERS.copy()
-    headers["Referer"] = "https://www.instagram.com/"
+    headers.update({
+        "Referer": "https://www.instagram.com/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Upgrade-Insecure-Requests": "1",
+    })
 
     try:
-        resp = requests.get(url, headers=headers, cookies=cookies, timeout=25)
+        resp = requests.get(
+            url,
+            headers=headers,
+            cookies=cookies,
+            timeout=30,
+            allow_redirects=True,
+        )
         resp.raise_for_status()
         html = resp.text
+        final_url = resp.url
     except Exception as e:
         logger.error(f"Fallback failed: {e}")
         return [], ""
 
     media_urls = []
-    # Improved patterns - prefer high quality images, skip profile pics & small thumbnails
-    patterns = [
-        r'"display_url":"(https://[^"]+)"',
-        r'"image_versions2":\{"candidates":\[\{"url":"(https://[^"]+)"',
-        r'"url":"(https://scontent[^"]+?_[ns]\d+x\d+[^"]*\.jpg[^"]*)"',
-        r'"url":"(https://scontent[^"]+\.jpg[^"]*)"',
-        r'property="og:image" content="(https://[^"]+)"',
-        r'"video_url":"(https://[^"]+)"',
-    ]
-    for pattern in patterns:
-        for u in re.findall(pattern, html):
-            u = u.replace("\\u0026", "&").replace("\\/", "/").replace("&amp;", "&")
-            if u.startswith("http") and u not in media_urls:
-                if any(x in u.lower() for x in ["150x150", "320x320", "s150x150", "s320x320", "profile", "t51.2885-19"]):
-                    continue
-                media_urls.append(u)
+    seen = set()
 
-    caption = ""
-    cap_match = re.search(r'"edge_media_to_caption":\{"edges":\[\{"node":\{"text":"([^"]+)"', html)
-    if cap_match:
+    def add_url(u):
+        if not u:
+            return
         try:
-            caption = _clean_caption(cap_match.group(1).encode().decode("unicode_escape"))
-        except:
-            caption = _clean_caption(cap_match.group(1))
-    else:
-        og = re.search(r'property="og:description" content="([^"]+)"', html)
-        if og:
-            caption = _clean_caption(og.group(1))
+            u = (
+                str(u)
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+                .replace("&amp;", "&")
+            )
+            if not u.startswith(("http://", "https://")):
+                return
+
+            low = u.lower()
+            # Do not collect common Instagram profile/avatar thumbnails.
+            if any(
+                x in low
+                for x in [
+                    "150x150", "320x320", "s150x150", "s320x320",
+                    "profile_pic", "profilepic", "t51.2885-19"
+                ]
+            ):
+                return
+
+            if u not in seen:
+                seen.add(u)
+                media_urls.append(u)
+        except Exception:
+            pass
+
+    # Common JSON/HTML locations used by Instagram pages.
+    patterns = [
+        r'"display_url"\s*:\s*"([^"]+)"',
+        r'"video_url"\s*:\s*"([^"]+)"',
+        r'"image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"',
+        r'"candidates"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"',
+        r'"url"\s*:\s*"(https?://[^"]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"',
+        r'property=["\']og:image["\']\s+content=["\']([^"\']+)',
+        r'property=["\']og:video["\']\s+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:(?:image|video)["\']',
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, html, flags=re.IGNORECASE):
+            add_url(match)
+
+    # Decode HTML/JSON escaped URLs once more.
+    try:
+        unescaped = (
+            html.replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003D", "=")
+        )
+        for pattern in patterns[:6]:
+            for match in re.findall(pattern, unescaped, flags=re.IGNORECASE):
+                add_url(match)
+    except Exception:
+        pass
+
+    # Caption extraction.
+    caption = ""
+    caption_patterns = [
+        r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']*)',
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)',
+        r'"edge_media_to_caption"\s*:\s*\{\s*"edges"\s*:\s*\[\s*\{\s*"node"\s*:\s*\{\s*"text"\s*:\s*"((?:\\.|[^"])*)"',
+    ]
+
+    for pattern in caption_patterns:
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if match:
+            raw = match.group(1)
+            try:
+                caption = _clean_caption(
+                    bytes(raw, "utf-8").decode("unicode_escape")
+                )
+            except Exception:
+                caption = _clean_caption(raw)
+            if caption:
+                break
 
     files = []
-    seen = set()
+
     for i, media_url in enumerate(media_urls[:12]):
-        if media_url in seen:
-            continue
-        seen.add(media_url)
         try:
-            r = requests.get(media_url, headers=headers, timeout=40)
+            r = requests.get(
+                media_url,
+                headers={
+                    **headers,
+                    "Referer": final_url if "instagram.com" in final_url else "https://www.instagram.com/",
+                },
+                cookies=cookies,
+                timeout=45,
+            )
             r.raise_for_status()
-            if len(r.content) < 15000:
+
+            if len(r.content) < 1000:
                 continue
+
             content_type = r.headers.get("Content-Type", "").lower()
-            if "video" in content_type or media_url.endswith((".mp4", ".mov")):
+            clean_url = media_url.lower().split("?")[0]
+
+            if "video/" in content_type or clean_url.endswith((".mp4", ".mov", ".m4v", ".webm")):
                 ext = ".mp4"
-            elif "png" in content_type:
+            elif "png" in content_type or clean_url.endswith(".png"):
                 ext = ".png"
-            elif "webp" in content_type:
+            elif "webp" in content_type or clean_url.endswith(".webp"):
                 ext = ".webp"
             else:
                 ext = ".jpg"
-            path = os.path.join(download_dir, f"{i:03d}_photo{ext}")
+
+            path = os.path.join(download_dir, f"{i:03d}_instagram{ext}")
             with open(path, "wb") as f:
                 f.write(r.content)
+
             files.append(path)
-        except:
+
+        except Exception as e:
+            logger.warning(f"Fallback media download failed: {e}")
             continue
+
     return files, caption
 
 def download_media(url: str, download_dir: str) -> tuple:
-    url = _resolve_redirect(url)
+    url = _resolve_redirect(url).strip().rstrip(".,!?;:)\\]}>'\"")
 
-    # 1. SaverAPI first (best for Instagram)
+    is_instagram = "instagram.com" in url.lower()
+
+    # Instagram: try API first, yt-dlp second, HTML fallback third.
+    # Other sites retain the original general flow.
+    if is_instagram:
+        files, caption = _saverapi_download(url, download_dir)
+        if files:
+            logger.info(f"[{url}] Instagram SaverAPI: {len(files)} file(s)")
+            return files, caption
+
+        try:
+            files, caption = _ytdlp_download(url, download_dir)
+            if files:
+                logger.info(f"[{url}] Instagram yt-dlp: {len(files)} file(s)")
+                return files, caption
+        except Exception as e:
+            logger.warning(f"[{url}] Instagram yt-dlp failed: {e}")
+            if "private" in str(e).lower() or "login" in str(e).lower():
+                # Still try the fallback scraper before giving up.
+                pass
+
+        files, caption = _fallback_scrape(url, download_dir)
+        if files:
+            logger.info(f"[{url}] Instagram fallback: {len(files)} file(s)")
+            return files, caption
+
+        logger.error(f"[{url}] All Instagram methods failed")
+        return [], ""
+
+    # General sites.
     files, caption = _saverapi_download(url, download_dir)
     if files:
         logger.info(f"[{url}] SaverAPI: {len(files)} file(s)")
         return files, caption
 
-    # 2. yt-dlp
     try:
         files, caption = _ytdlp_download(url, download_dir)
         if files:
@@ -594,15 +785,13 @@ def download_media(url: str, download_dir: str) -> tuple:
             return files, caption
     except Exception as e:
         logger.warning(f"[{url}] yt-dlp failed: {e}")
-        if "private" in str(e).lower() or "login" in str(e).lower():
-            raise
 
-    # 3. Fallback
     files, caption = _fallback_scrape(url, download_dir)
     if files:
         logger.info(f"[{url}] Fallback: {len(files)} file(s)")
     else:
         logger.error(f"[{url}] All methods failed")
+
     return files, caption
 
 # ----------------------------------------------------------------------
