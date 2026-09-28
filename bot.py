@@ -375,7 +375,7 @@ async def send_join_prompt(update: Update):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=join_keyboard())
 
 # ----------------------------------------------------------------------
-# DOWNLOAD LOGIC (Improved for Photos + Albums + Videos)
+# DOWNLOAD LOGIC
 # ----------------------------------------------------------------------
 SAVERAPI_ENDPOINT = "https://saverapi.net/api/all-in-one-downloader-api"
 
@@ -520,20 +520,20 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
         return [], ""
 
     media_urls = []
-    # High quality Instagram image patterns
+    # Improved patterns - prefer high quality images, skip profile pics & small thumbnails
     patterns = [
         r'"display_url":"(https://[^"]+)"',
         r'"image_versions2":\{"candidates":\[\{"url":"(https://[^"]+)"',
+        r'"url":"(https://scontent[^"]+?_[ns]\d+x\d+[^"]*\.jpg[^"]*)"',
+        r'"url":"(https://scontent[^"]+\.jpg[^"]*)"',
         r'property="og:image" content="(https://[^"]+)"',
-        r'"url":"(https://scontent[^"]+\.(?:jpg|webp)[^"]*)"',
         r'"video_url":"(https://[^"]+)"',
     ]
     for pattern in patterns:
         for u in re.findall(pattern, html):
             u = u.replace("\\u0026", "&").replace("\\/", "/").replace("&amp;", "&")
             if u.startswith("http") and u not in media_urls:
-                # Skip small thumbnails / profile pics
-                if any(x in u for x in ["150x150", "320x320", "s150x150", "s320x320", "profile"]):
+                if any(x in u.lower() for x in ["150x150", "320x320", "s150x150", "s320x320", "profile", "t51.2885-19"]):
                     continue
                 media_urls.append(u)
 
@@ -558,7 +558,7 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
         try:
             r = requests.get(media_url, headers=headers, timeout=40)
             r.raise_for_status()
-            if len(r.content) < 15000:  # skip tiny files
+            if len(r.content) < 15000:
                 continue
             content_type = r.headers.get("Content-Type", "").lower()
             if "video" in content_type or media_url.endswith((".mp4", ".mov")):
@@ -580,7 +580,7 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
 def download_media(url: str, download_dir: str) -> tuple:
     url = _resolve_redirect(url)
 
-    # 1. SaverAPI (best for Instagram photos + albums)
+    # 1. SaverAPI first (best for Instagram)
     files, caption = _saverapi_download(url, download_dir)
     if files:
         logger.info(f"[{url}] SaverAPI: {len(files)} file(s)")
@@ -597,7 +597,7 @@ def download_media(url: str, download_dir: str) -> tuple:
         if "private" in str(e).lower() or "login" in str(e).lower():
             raise
 
-    # 3. Improved fallback
+    # 3. Fallback
     files, caption = _fallback_scrape(url, download_dir)
     if files:
         logger.info(f"[{url}] Fallback: {len(files)} file(s)")
