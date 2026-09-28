@@ -46,7 +46,6 @@ SHOPPING_OFFER_URL = os.environ.get("SHOPPING_OFFER_URL", FORCE_SUB_CHANNEL_LINK
 BOT_SERVICE_LABEL = os.environ.get("BOT_SERVICE_LABEL", "🤖 Our Bot Service")
 BOT_SERVICE_LINK = os.environ.get("BOT_SERVICE_LINK", "https://t.me/KbBotService")
 
-# Premium settings
 PREMIUM_PRICE_LABEL = os.environ.get("PREMIUM_PRICE_LABEL", "₹20 / month")
 PREMIUM_CONTACT = "@share_kb"
 PREMIUM_DAYS_DEFAULT = int(os.environ.get("PREMIUM_DAYS_DEFAULT", "30"))
@@ -55,18 +54,12 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
-# ----------------------------------------------------------------------
-# REFERRAL / POINTS SYSTEM
-# ----------------------------------------------------------------------
 STARTER_POINTS = int(os.environ.get("STARTER_POINTS", "3"))
 REFERRAL_POINTS = int(os.environ.get("REFERRAL_POINTS", "10"))
 POINTS_FILE = os.path.join(DATA_DIR, "points.json")
 
 SAVERAPI_KEY = os.environ.get("SAVERAPI_KEY", "")
 
-# ----------------------------------------------------------------------
-# COOKIES
-# ----------------------------------------------------------------------
 SITE_COOKIES = os.environ.get("SITE_COOKIES") or os.environ.get("YOUTUBE_COOKIES", "")
 COOKIES_FILE = os.path.join(DATA_DIR, "cookies.txt")
 
@@ -80,7 +73,7 @@ else:
             os.remove(COOKIES_FILE)
         except Exception:
             pass
-    print("⚠️ SITE_COOKIES is not set. Private videos will fail.")
+    print("⚠️ SITE_COOKIES is not set. Private content may fail.")
 
 URL_REGEX = re.compile(r"(https?://\S+)", re.IGNORECASE)
 
@@ -110,22 +103,14 @@ AUDIO_EXTENSIONS = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
 SKIP_EXTENSIONS = (".part", ".ytdl", ".json", ".description", ".info.json")
 
 HTTP_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
 }
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------------------
-# KEYBOARDS
-# ----------------------------------------------------------------------
 MAIN_MENU = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🚀 Start"), KeyboardButton("📋 Supported Sites")],
@@ -145,7 +130,7 @@ ADMIN_MENU = ReplyKeyboardMarkup(
 )
 
 # ----------------------------------------------------------------------
-# USER STORAGE
+# STORAGE FUNCTIONS
 # ----------------------------------------------------------------------
 def load_users() -> set:
     if os.path.exists(USERS_FILE):
@@ -163,9 +148,6 @@ def save_user(user_id: int):
         with open(USERS_FILE, "w") as f:
             json.dump(list(users), f)
 
-# ----------------------------------------------------------------------
-# REFERRAL / POINTS STORAGE
-# ----------------------------------------------------------------------
 def load_points() -> dict:
     if os.path.exists(POINTS_FILE):
         try:
@@ -198,9 +180,7 @@ def get_referral_count(user_id: int) -> int:
     return record.get("referral_count", 0)
 
 def has_points(user_id: int) -> bool:
-    if user_id == ADMIN_ID:
-        return True
-    if is_premium(user_id):
+    if user_id == ADMIN_ID or is_premium(user_id):
         return True
     return get_points(user_id) > 0
 
@@ -265,49 +245,29 @@ def supported_sites_text() -> str:
     return (
         "*📋 SUPPORTED SITES*\n\n"
         "Our downloader currently supports the following platforms:\n\n"
-        "▶️ YouTube\n"
-        "📘 Facebook\n"
-        "📸 Instagram\n"
-        "🎵 TikTok\n"
-        "𝕏 Twitter / X\n"
-        "👽 Reddit\n"
-        "📌 Pinterest\n"
-        "🎬 Vimeo\n"
-        "🎮 Twitch (Clips)\n"
-        "🌐 VK\n"
-        "🟢 OK.ru\n"
-        "📝 Tumblr\n"
-        "💜 Likee\n"
-        "🎧 SoundCloud\n"
-        "🧵 Threads\n"
-        "📺 Dailymotion\n"
-        "👻 Snapchat\n\n"
+        "▶️ YouTube\n📘 Facebook\n📸 Instagram\n🎵 TikTok\n𝕏 Twitter / X\n"
+        "👽 Reddit\n📌 Pinterest\n🎬 Vimeo\n🎮 Twitch (Clips)\n🌐 VK\n"
+        "🟢 OK.ru\n📝 Tumblr\n💜 Likee\n🎧 SoundCloud\n🧵 Threads\n"
+        "📺 Dailymotion\n👻 Snapchat\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "*⚠️ NOT SUPPORTED*\n\n"
-        "🔒 Spotify\n"
-        "🍎 Apple Music\n\n"
+        "🔒 Spotify\n🍎 Apple Music\n\n"
         "These platforms are currently not supported due to DRM protection.\n\n"
         "✨ More platforms may be added in the future!"
     )
 
 def join_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📢 Join our channel", url=FORCE_SUB_CHANNEL_LINK)],
-            [InlineKeyboardButton("✅ I've joined, check again", callback_data="check_join")],
-        ]
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join our channel", url=FORCE_SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton("✅ I've joined, check again", callback_data="check_join")],
+    ])
 
 def video_action_keyboard(source_url: str) -> InlineKeyboardMarkup:
     share_url = f"https://t.me/share/url?url={quote(source_url, safe='')}"
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📤 Share Video", url=share_url),
-                InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
-            ]
-        ]
-    )
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("📤 Share Video", url=share_url),
+        InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
+    ]])
 
 def referral_link_for(user_id: int, bot_username: str) -> str:
     return f"https://t.me/{bot_username}?start=ref_{user_id}"
@@ -329,19 +289,11 @@ async def send_referral_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"When a friend joins using your link, you get *{REFERRAL_POINTS} points* instantly."
     )
     await update.effective_message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "📤 Share this link",
-                        url=f"https://t.me/share/url?url={quote(link, safe='')}"
-                        f"&text={quote('🎬 Download any video or photo for free!', safe='')}",
-                    )
-                ]
-            ]
-        ),
+        text, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📤 Share this link",
+                url=f"https://t.me/share/url?url={quote(link, safe='')}&text={quote('🎬 Download any video or photo for free!', safe='')}")
+        ]])
     )
 
 async def referral_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -353,7 +305,6 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if is_premium(user_id):
         days_left = premium_days_left(user_id)
         text = (
@@ -371,9 +322,7 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Download videos & photos from YouTube, Facebook, Instagram, TikTok and many more sites easily.\n\n"
         f"*Premium Price:* Only *{PREMIUM_PRICE_LABEL}*\n\n"
         "*Benefits:*\n"
-        "✅ Unlimited downloads\n"
-        "✅ No points required\n"
-        "✅ Priority support\n\n"
+        "✅ Unlimited downloads\n✅ No points required\n✅ Priority support\n\n"
         f"*To buy Premium contact:*\n*{PREMIUM_CONTACT}*\n\n"
         "Send payment screenshot + your Telegram username or User ID.\n\n"
         f"For any problem contact: *{PREMIUM_CONTACT}*"
@@ -400,18 +349,11 @@ async def addpremium_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     grant_premium(target_id, days)
-    await update.message.reply_text(
-        f"✅ Premium granted to `{target_id}` for *{days}* day(s).",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    await update.message.reply_text(f"✅ Premium granted to `{target_id}` for *{days}* day(s).", parse_mode=ParseMode.MARKDOWN)
     try:
         await context.bot.send_message(
             chat_id=target_id,
-            text=(
-                f"*🎉 Your Premium is now active for {days} day(s)!*\n"
-                f"Unlimited downloads unlocked.\n\n"
-                f"For any problem contact: *{PREMIUM_CONTACT}*"
-            ),
+            text=f"*🎉 Your Premium is now active for {days} day(s)!*\nUnlimited downloads unlocked.\n\nFor any problem contact: *{PREMIUM_CONTACT}*",
             parse_mode=ParseMode.MARKDOWN,
         )
     except TelegramError:
@@ -433,35 +375,29 @@ async def send_join_prompt(update: Update):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=join_keyboard())
 
 # ----------------------------------------------------------------------
-# DOWNLOAD LOGIC
+# DOWNLOAD LOGIC - Improved for Instagram Photos & Albums
 # ----------------------------------------------------------------------
 SAVERAPI_ENDPOINT = "https://saverapi.net/api/all-in-one-downloader-api"
 
 def _resolve_redirect(url: str) -> str:
     try:
         resp = requests.head(url, headers=HTTP_HEADERS, allow_redirects=True, timeout=10)
-        final_url = resp.url
+        return resp.url
     except requests.RequestException:
         try:
             resp = requests.get(url, headers=HTTP_HEADERS, allow_redirects=True, timeout=15, stream=True)
-            final_url = resp.url
+            final = resp.url
             resp.close()
-        except requests.RequestException as e:
-            logger.warning(f"Could not resolve redirect for {url}: {e}")
+            return final
+        except requests.RequestException:
             return url
-    if final_url != url:
-        logger.info(f"Resolved redirect: {url} -> {final_url}")
-    return final_url
 
 def _clean_caption(text) -> str:
     if not text:
         return ""
     text = str(text).strip()
-    if not text:
-        return ""
-    limit = 1000
-    if len(text) > limit:
-        text = text[:limit].rstrip() + "…"
+    if len(text) > 1000:
+        text = text[:1000].rstrip() + "…"
     return text
 
 def _saverapi_download(url: str, download_dir: str) -> tuple:
@@ -472,44 +408,65 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
             SAVERAPI_ENDPOINT,
             params={"url": url},
             headers={"x-api-key": SAVERAPI_KEY},
-            timeout=30,
+            timeout=40,
         )
         resp.raise_for_status()
         data = resp.json()
-    except (requests.RequestException, ValueError) as e:
-        logger.warning(f"SaverAPI request failed: {e}")
+    except Exception as e:
+        logger.warning(f"SaverAPI failed: {e}")
         return [], ""
 
     if data.get("error"):
         logger.warning(f"SaverAPI error: {data.get('error')}")
         return [], ""
 
-    caption = _clean_caption(data.get("caption") or data.get("title"))
+    caption = _clean_caption(data.get("caption") or data.get("title") or "")
 
-    items = data.get("medias") or data.get("items") or data.get("photos")
-    if not items:
-        single_url = data.get("download_url")
-        items = [{"url": single_url, "type": data.get("type", "video")}] if single_url else []
+    # Handle different response formats for albums/photos
+    items = []
+    if data.get("medias"):
+        items = data["medias"]
+    elif data.get("items"):
+        items = data["items"]
+    elif data.get("photos"):
+        items = data["photos"]
+    elif data.get("download_url"):
+        items = [{"url": data["download_url"], "type": data.get("type", "video")}]
+    elif data.get("url"):
+        items = [{"url": data["url"], "type": data.get("type", "image")}]
 
     if not items:
         return [], ""
 
     files = []
-    for i, item in enumerate(items[:10]):
-        media_url = item.get("url") or item.get("download_url")
-        media_type = (item.get("type") or "video").lower()
+    for i, item in enumerate(items[:12]):  # Instagram albums can have up to 10-12 items
+        media_url = item.get("url") or item.get("download_url") or item.get("src")
         if not media_url:
             continue
+
+        media_type = (item.get("type") or item.get("media_type") or "").lower()
         try:
             r = requests.get(media_url, headers=HTTP_HEADERS, timeout=60)
             r.raise_for_status()
-        except requests.RequestException:
+        except Exception:
             continue
-        ext = ".mp4" if "video" in media_type else ".jpg" if "photo" in media_type or "image" in media_type else ".mp3"
-        path = os.path.join(download_dir, f"{i:03d}_saverapi{ext}")
+
+        # Decide extension
+        content_type = r.headers.get("Content-Type", "").lower()
+        if "video" in media_type or "video" in content_type or media_url.endswith((".mp4", ".mov")):
+            ext = ".mp4"
+        elif "png" in content_type:
+            ext = ".png"
+        elif "webp" in content_type:
+            ext = ".webp"
+        else:
+            ext = ".jpg"
+
+        path = os.path.join(download_dir, f"{i:03d}_media{ext}")
         with open(path, "wb") as f:
             f.write(r.content)
         files.append(path)
+
     return files, caption
 
 def _ytdlp_download(url: str, download_dir: str) -> tuple:
@@ -521,48 +478,28 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
-        "playlistend": 10,
+        "playlistend": 12,
         "retries": 5,
         "fragment_retries": 5,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.instagram.com/",
-        },
+        "http_headers": HTTP_HEADERS,
         "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web", "tv"],
-            },
+            "youtube": {"player_client": ["android", "web", "tv"]},
         },
     }
 
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 50:
         ydl_opts["cookiefile"] = COOKIES_FILE
-        logger.info("Using cookies for yt-dlp")
-    else:
-        logger.warning("No valid cookies file found")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True) or {}
     except Exception as e:
         error_msg = str(e).lower()
-        if any(x in error_msg for x in [
-            "private video", "sign in", "login required", "age-restricted",
-            "members-only", "premium", "this video is private", "confirm your age",
-            "login to instagram", "challenge", "rate-limit", "please wait"
-        ]):
-            raise Exception(
-                "This video is Private / Age-restricted / Login required.\n"
-                "Please update SITE_COOKIES with fresh Instagram cookies."
-            ) from e
+        if any(x in error_msg for x in ["private", "login", "age-restricted", "challenge", "rate-limit"]):
+            raise Exception("This content requires login / is private. Update SITE_COOKIES.") from e
         raise
 
-    raw_caption = info.get("title") or info.get("description") or ""
-    if raw_caption.lower() in ("", "no title"):
-        raw_caption = info.get("description") or ""
-    caption = _clean_caption(raw_caption)
+    caption = _clean_caption(info.get("title") or info.get("description") or "")
 
     files = sorted(
         os.path.join(download_dir, name)
@@ -572,108 +509,119 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
     return files, caption
 
 def _fallback_scrape(url: str, download_dir: str) -> tuple:
+    """Improved fallback especially for Instagram photos/albums"""
     cookies = None
     if os.path.exists(COOKIES_FILE):
         try:
             jar = requests.cookies.RequestsCookieJar()
-            with open(COOKIES_FILE) as f:
+            with open(COOKIES_FILE, encoding="utf-8") as f:
                 for line in f:
                     if line.startswith("#") or not line.strip():
                         continue
                     parts = line.strip().split("\t")
-                    if len(parts) == 7:
-                        domain, _, path, _, _, name, value = parts
+                    if len(parts) >= 7:
+                        domain, _, path, _, _, name, value = parts[:7]
                         jar.set(name, value, domain=domain, path=path)
             cookies = jar
         except Exception as e:
-            logger.warning(f"Could not parse cookies: {e}")
+            logger.warning(f"Cookie parse error: {e}")
+
+    headers = HTTP_HEADERS.copy()
+    headers["Referer"] = "https://www.instagram.com/"
 
     try:
-        resp = requests.get(url, headers=HTTP_HEADERS, cookies=cookies, timeout=20)
+        resp = requests.get(url, headers=headers, cookies=cookies, timeout=25)
         resp.raise_for_status()
         html = resp.text
-    except requests.RequestException as e:
-        logger.error(f"Fallback scrape failed: {e}")
+    except Exception as e:
+        logger.error(f"Fallback request failed: {e}")
         return [], ""
 
+    # Extract all possible image/video URLs
     media_urls = []
-    for pattern in (
-        r'<meta[^>]+property="og:video(?::url)?"[^>]+content="([^"]+)"',
-        r'<meta[^>]+property="og:image(?::secure_url)?"[^>]+content="([^"]+)"',
-        r'<meta[^>]+name="twitter:image"[^>]+content="([^"]+)"',
-        r'<meta[^>]+content="([^"]+)"[^>]+property="og:image(?::secure_url)?"',
-    ):
-        media_urls += re.findall(pattern, html)
+    patterns = [
+        r'"display_url":"([^"]+)"',
+        r'"video_url":"([^"]+)"',
+        r'property="og:image" content="([^"]+)"',
+        r'property="og:video" content="([^"]+)"',
+        r'"url":"(https://[^"]+\.(?:jpg|jpeg|png|webp|mp4)[^"]*)"',
+        r'srcset="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
+    ]
+    for pattern in patterns:
+        found = re.findall(pattern, html)
+        for u in found:
+            u = u.replace("\\u0026", "&").replace("\\/", "/")
+            if u.startswith("http") and u not in media_urls:
+                media_urls.append(u)
 
-    caption_match = re.search(
-        r'<meta[^>]+property="og:description"[^>]+content="([^"]+)"', html
-    ) or re.search(
-        r'<meta[^>]+content="([^"]+)"[^>]+property="og:description"', html
-    )
-    raw_caption = caption_match.group(1) if caption_match else ""
-    caption = _clean_caption(raw_caption.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"'))
-
-    seen, ordered = set(), []
-    for u in media_urls:
-        u = u.replace("&amp;", "&")
-        if u not in seen:
-            seen.add(u)
-            ordered.append(u)
+    # Caption
+    caption = ""
+    cap_match = re.search(r'"edge_media_to_caption":\{"edges":\[\{"node":\{"text":"([^"]+)"', html)
+    if cap_match:
+        caption = _clean_caption(cap_match.group(1).encode().decode("unicode_escape"))
+    else:
+        og_cap = re.search(r'property="og:description" content="([^"]+)"', html)
+        if og_cap:
+            caption = _clean_caption(og_cap.group(1))
 
     files = []
-    for i, media_url in enumerate(ordered[:10]):
-        try:
-            r = requests.get(media_url, headers=HTTP_HEADERS, timeout=30)
-            r.raise_for_status()
-        except requests.RequestException:
+    seen = set()
+    for i, media_url in enumerate(media_urls[:12]):
+        if media_url in seen:
             continue
-        content_type = r.headers.get("Content-Type", "")
-        if "video" in content_type:
-            ext = ".mp4"
-        elif "png" in content_type:
-            ext = ".png"
-        elif "webp" in content_type:
-            ext = ".webp"
-        else:
-            ext = ".jpg"
-        path = os.path.join(download_dir, f"{i:03d}_fallback{ext}")
-        with open(path, "wb") as f:
-            f.write(r.content)
-        files.append(path)
+        seen.add(media_url)
+        try:
+            r = requests.get(media_url, headers=headers, timeout=40)
+            r.raise_for_status()
+            content_type = r.headers.get("Content-Type", "").lower()
+            if "video" in content_type or media_url.endswith((".mp4", ".mov")):
+                ext = ".mp4"
+            elif "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            else:
+                ext = ".jpg"
+            path = os.path.join(download_dir, f"{i:03d}_fallback{ext}")
+            with open(path, "wb") as f:
+                f.write(r.content)
+            files.append(path)
+        except Exception:
+            continue
+
     return files, caption
 
 def download_media(url: str, download_dir: str) -> tuple:
     url = _resolve_redirect(url)
 
-    # First try SaverAPI (best for Instagram)
+    # 1. SaverAPI first (best for Instagram photos + albums)
     files, caption = _saverapi_download(url, download_dir)
     if files:
-        logger.info(f"[{url}] downloaded via SaverAPI: {len(files)} file(s)")
+        logger.info(f"[{url}] SaverAPI success: {len(files)} file(s)")
         return files, caption
 
-    # Then try yt-dlp
+    # 2. yt-dlp
     try:
         files, caption = _ytdlp_download(url, download_dir)
         if files:
-            logger.info(f"[{url}] downloaded via yt-dlp: {len(files)} file(s)")
+            logger.info(f"[{url}] yt-dlp success: {len(files)} file(s)")
+            return files, caption
     except Exception as e:
         logger.warning(f"[{url}] yt-dlp failed: {e}")
-        if "Private" in str(e) or "Age-restricted" in str(e) or "Login required" in str(e):
+        if "private" in str(e).lower() or "login" in str(e).lower():
             raise
-        files, caption = [], ""
 
-    # Last resort
-    if not files:
-        files, caption = _fallback_scrape(url, download_dir)
-        if files:
-            logger.info(f"[{url}] downloaded via fallback scrape: {len(files)} file(s)")
-        else:
-            logger.error(f"[{url}] all three download tiers failed.")
+    # 3. Fallback scrape (improved for Instagram)
+    files, caption = _fallback_scrape(url, download_dir)
+    if files:
+        logger.info(f"[{url}] Fallback success: {len(files)} file(s)")
+    else:
+        logger.error(f"[{url}] All methods failed")
 
     return files, caption
 
 # ----------------------------------------------------------------------
-# SENDING FILES
+# SEND FILES
 # ----------------------------------------------------------------------
 async def send_downloaded_file(update: Update, file_path: str, caption: str = "", source_url: str = ""):
     ext = os.path.splitext(file_path)[1].lower()
@@ -681,16 +629,11 @@ async def send_downloaded_file(update: Update, file_path: str, caption: str = ""
         if ext in IMAGE_EXTENSIONS:
             await update.message.reply_photo(photo=f, caption=caption or "✅ Here's your photo!")
         elif ext in AUDIO_EXTENSIONS:
-            await update.message.reply_audio(
-                audio=f, caption=caption or "✅ Here's your audio!", read_timeout=120, write_timeout=120
-            )
+            await update.message.reply_audio(audio=f, caption=caption or "✅ Here's your audio!", read_timeout=120, write_timeout=120)
         else:
             await update.message.reply_video(
-                video=f,
-                caption=caption or "✅ Here's your video!",
-                supports_streaming=True,
-                read_timeout=120,
-                write_timeout=120,
+                video=f, caption=caption or "✅ Here's your video!",
+                supports_streaming=True, read_timeout=120, write_timeout=120,
                 reply_markup=video_action_keyboard(source_url) if source_url else None,
             )
 
@@ -702,26 +645,24 @@ async def send_downloaded_files(update: Update, file_paths: list, caption: str =
     album_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() not in AUDIO_EXTENSIONS]
     audio_paths = [p for p in file_paths if os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS]
 
-    has_video = any(
-        os.path.splitext(p)[1].lower() not in IMAGE_EXTENSIONS | AUDIO_EXTENSIONS for p in album_paths
-    )
+    has_video = any(os.path.splitext(p)[1].lower() not in IMAGE_EXTENSIONS | AUDIO_EXTENSIONS for p in album_paths)
 
     for batch_start in range(0, len(album_paths), 10):
-        batch = album_paths[batch_start : batch_start + 10]
-        opened_files = []
+        batch = album_paths[batch_start:batch_start + 10]
+        opened = []
         media = []
         for idx, path in enumerate(batch):
             f = open(path, "rb")
-            opened_files.append(f)
+            opened.append(f)
             ext = os.path.splitext(path)[1].lower()
-            item_caption = (caption or "✅ Here's everything from that post!") if idx == 0 else None
+            item_caption = (caption or "✅ Full album from the post!") if idx == 0 else None
             if ext in IMAGE_EXTENSIONS:
                 media.append(InputMediaPhoto(media=f, caption=item_caption))
             else:
                 media.append(InputMediaVideo(media=f, caption=item_caption))
         if media:
             await update.message.reply_media_group(media=media, read_timeout=120, write_timeout=120)
-        for f in opened_files:
+        for f in opened:
             f.close()
 
     if has_video and source_url:
@@ -731,7 +672,7 @@ async def send_downloaded_files(update: Update, file_paths: list, caption: str =
         await send_downloaded_file(update, path, caption)
 
 # ----------------------------------------------------------------------
-# COMMAND HANDLERS
+# HANDLERS
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -739,11 +680,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(user_id)
 
     if user_id == ADMIN_ID:
-        await update.message.reply_text(
-            "*👑 Admin Panel*\n\nChoose an option from the menu below.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=ADMIN_MENU,
-        )
+        await update.message.reply_text("*👑 Admin Panel*\n\nChoose an option from the menu below.", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
         return
 
     if not await is_subscribed(context.bot, user_id):
@@ -755,56 +692,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if payload.startswith("ref_"):
             try:
                 referrer_id = int(payload[4:])
+                if referrer_id and register_referral(referrer_id, user_id):
+                    try:
+                        await context.bot.send_message(chat_id=referrer_id, text=f"*🎉 New user joined with your link!*\n+{REFERRAL_POINTS} points added.", parse_mode=ParseMode.MARKDOWN)
+                    except TelegramError:
+                        pass
             except ValueError:
-                referrer_id = None
-            if referrer_id and register_referral(referrer_id, user_id):
-                try:
-                    await context.bot.send_message(
-                        chat_id=referrer_id,
-                        text=f"*🎉 A new user joined using your referral link!*\n+{REFERRAL_POINTS} points added.",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                except TelegramError:
-                    pass
+                pass
 
     points = get_points(user_id)
     await update.message.reply_text(
         "*👋 Welcome to KB Downloader!*\n\n"
-        "📥 Send me any video, photo or audio link from:\n"
+        "📥 Send any video, photo or audio link from:\n"
         "▶️ YouTube • Facebook • Instagram • TikTok and more\n\n"
-        "⚡ I will automatically download and send the file back to you!\n\n"
         f"⭐ Your points: *{points}* (1 point = 1 download)\n"
         f"🎁 Refer a friend to earn +{REFERRAL_POINTS} points!\n\n"
-        f"⚠️ File limit: Maximum {MAX_FILESIZE_MB}MB\n\n"
+        f"⚠️ Max file size: {MAX_FILESIZE_MB}MB\n\n"
         "🚀 Just send a link to start!",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=MAIN_MENU,
+        parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU,
     )
-    await update.message.reply_text(
-        "👇 Check these out:",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
-                    InlineKeyboardButton(BOT_SERVICE_LABEL, url=BOT_SERVICE_LINK),
-                ],
-                [InlineKeyboardButton("🎁 Refer & Earn Points", callback_data="show_referral")],
-            ]
-        ),
-    )
+    await update.message.reply_text("👇 Check these out:", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
+         InlineKeyboardButton(BOT_SERVICE_LABEL, url=BOT_SERVICE_LINK)],
+        [InlineKeyboardButton("🎁 Refer & Earn Points", callback_data="show_referral")],
+    ]))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*🆘 Need Help?*\n\n"
-        f"If you are facing any issue, contact:\n*{PREMIUM_CONTACT}*\n\n"
-        "Describe your problem and we will help you.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=MAIN_MENU,
+        f"*🆘 Need Help?*\n\nContact: *{PREMIUM_CONTACT}*\n\nDescribe your problem.",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU,
     )
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id == ADMIN_ID:
+    if update.effective_user.id == ADMIN_ID:
         await update.message.reply_text("*👑 Admin Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
     else:
         await update.message.reply_text("*🏠 Main Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
@@ -814,32 +734,26 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     users = load_users()
     points_data = load_points()
-    premium_count = sum(1 for uid, rec in points_data.items() if rec.get("premium_until", 0) > time.time())
+    premium_count = sum(1 for rec in points_data.values() if rec.get("premium_until", 0) > time.time())
     await update.message.reply_text(
-        f"*📊 Bot Status*\n\n"
-        f"👥 Total Users: *{len(users)}*\n"
-        f"💎 Active Premium: *{premium_count}*\n"
-        f"⭐ Starter Points: {STARTER_POINTS}\n"
-        f"🎁 Referral Points: {REFERRAL_POINTS}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ADMIN_MENU,
+        f"*📊 Bot Status*\n\n👥 Total Users: *{len(users)}*\n💎 Active Premium: *{premium_count}*\n"
+        f"⭐ Starter Points: {STARTER_POINTS}\n🎁 Referral Points: {REFERRAL_POINTS}",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU,
     )
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
     await query.answer()
-    if await is_subscribed(context.bot, user_id):
-        await query.edit_message_text("✅ Thanks for joining! You can now send links to download.")
+    if await is_subscribed(context.bot, query.from_user.id):
+        await query.edit_message_text("✅ Thanks for joining! You can now send links.")
     else:
-        await query.answer("❌ You haven't joined the channel yet!", show_alert=True)
+        await query.answer("❌ You haven't joined yet!", show_alert=True)
 
 BROADCAST_CAPTION_RE = re.compile(r"^/broadcast(@\w+)?\s*", re.IGNORECASE)
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     message = update.message
     source_message = message.reply_to_message
     text = None
@@ -854,19 +768,15 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not source_message and not text:
         await update.message.reply_text(
-            "*📢 How to Broadcast:*\n\n"
-            "1. Reply to any message with `/broadcast`\n"
-            "2. Or type `/broadcast Your message here`\n"
-            "3. Or send photo/video with caption `/broadcast Your caption`",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=ADMIN_MENU,
+            "*📢 How to Broadcast:*\n\n1. Reply to any message with `/broadcast`\n"
+            "2. Or `/broadcast Your message`\n3. Or send media with caption `/broadcast caption`",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU,
         )
         return
 
     users = load_users()
-    sent, failed = 0, 0
+    sent = failed = 0
     status = await update.message.reply_text(f"📢 Sending to {len(users)} users...")
-
     for uid in users:
         try:
             if source_message is message:
@@ -879,25 +789,16 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             failed += 1
         await asyncio.sleep(0.05)
-
     await status.edit_text(f"✅ Broadcast finished.\nSent: {sent}\nFailed: {failed}")
 
-# ----------------------------------------------------------------------
-# DOWNLOAD ANIMATION
-# ----------------------------------------------------------------------
 async def _animate_progress(status_msg, bot, chat_id):
-    frames = [
-        "⏳ Downloading",
-        "⏳ Downloading.",
-        "⏳ Downloading..",
-        "⏳ Downloading...",
-    ]
+    frames = ["⏳ Downloading", "⏳ Downloading.", "⏳ Downloading..", "⏳ Downloading..."]
     i = 0
     try:
         while True:
             try:
                 await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
-                await status_msg.edit_text(frames[i % len(frames)])
+                await status_msg.edit_text(frames[i % 4])
             except TelegramError:
                 pass
             i += 1
@@ -905,65 +806,30 @@ async def _animate_progress(status_msg, bot, chat_id):
     except asyncio.CancelledError:
         pass
 
-# ----------------------------------------------------------------------
-# MAIN MESSAGE HANDLER
-# ----------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
 
-    # ---------- ADMIN MENU ----------
     if user_id == ADMIN_ID:
         if text == "📊 Status":
             await stats_command(update, context)
             return
         if text == "👥 Total Users":
-            users = load_users()
-            await update.message.reply_text(
-                f"*👥 Total Users:* {len(users)}",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=ADMIN_MENU,
-            )
+            await update.message.reply_text(f"*👥 Total Users:* {len(load_users())}", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
             return
         if text == "📢 Broadcast":
-            await update.message.reply_text(
-                "*📢 How to Broadcast:*\n\n"
-                "1. Reply to any message with `/broadcast`\n"
-                "2. Or type `/broadcast Your message here`\n"
-                "3. Or send photo/video with caption `/broadcast Your caption`",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=ADMIN_MENU,
-            )
+            await update.message.reply_text("*📢 How to Broadcast:*\n\n1. Reply with `/broadcast`\n2. Or `/broadcast message`", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
             return
         if text == "💎 Give Premium":
-            await update.message.reply_text(
-                "*💎 Give Premium:*\n\n"
-                "`/addpremium <user_id> [days]`\n\n"
-                "*Example:*\n`/addpremium 123456789 30`\n\n"
-                "Default is 30 days.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=ADMIN_MENU,
-            )
+            await update.message.reply_text("*💎 Give Premium:*\n\n`/addpremium <user_id> [days]`\n\nExample: `/addpremium 123456789 30`", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
             return
         if text == "ℹ️ How to Give Premium":
-            await update.message.reply_text(
-                "*ℹ️ How to Give Premium:*\n\n"
-                "1. User pays and sends payment screenshot\n"
-                "2. Get their Telegram User ID (from @userinfobot)\n"
-                "3. Run this command:\n"
-                "`/addpremium 123456789 30`\n\n"
-                "→ 123456789 = User ID\n"
-                "→ 30 = number of days\n\n"
-                "User will automatically receive a confirmation message.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=ADMIN_MENU,
-            )
+            await update.message.reply_text("*ℹ️ How to Give Premium:*\n\n1. Get User ID from @userinfobot\n2. Run `/addpremium USER_ID 30`", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
             return
         if text == "🔙 User Menu":
             await update.message.reply_text("*🏠 Switched to User Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
             return
 
-    # ---------- NORMAL USER BUTTONS ----------
     if text == "🚀 Start":
         await start(update, context)
         return
@@ -994,35 +860,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = match.group(1)
     if not is_supported_url(url):
-        await update.message.reply_text(
-            "*Sorry, this site is not supported yet.*\nTap 📋 Supported Sites to see the full list.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text("*Sorry, this site is not supported yet.*\nTap 📋 Supported Sites.", parse_mode=ParseMode.MARKDOWN)
         return
 
     if not has_points(user_id):
-        bot_username = context.bot.username
-        link = referral_link_for(user_id, bot_username)
+        link = referral_link_for(user_id, context.bot.username)
         await update.message.reply_text(
-            "*❌ You are out of points.*\n\n"
-            f"*🎁 Share your referral link* — when a friend joins you get +{REFERRAL_POINTS} points!\n\n"
-            f"🔗 `{link}`\n\n"
-            f"*💎 Or buy Premium for unlimited downloads.*\n"
-            f"Contact: *{PREMIUM_CONTACT}*",
+            f"*❌ You are out of points.*\n\n*🎁 Share your link to earn +{REFERRAL_POINTS} points!*\n\n"
+            f"🔗 `{link}`\n\n*💎 Or buy Premium:* {PREMIUM_CONTACT}",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(
-                    "📤 Share & Earn Points",
-                    url=f"https://t.me/share/url?url={quote(link, safe='')}",
-                )]]
-            ),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 Share & Earn Points", url=f"https://t.me/share/url?url={quote(link, safe='')}")]])
         )
         return
 
     status_msg = await update.message.reply_text("⏳ Starting download...")
-    progress_task = asyncio.create_task(
-        _animate_progress(status_msg, context.bot, update.effective_chat.id)
-    )
+    progress_task = asyncio.create_task(_animate_progress(status_msg, context.bot, update.effective_chat.id))
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
@@ -1033,63 +885,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not file_paths:
                 await status_msg.edit_text(
                     "*❌ Could not download this media.*\n\n"
-                    "Possible reasons:\n"
-                    "• Video is Private / Age-restricted\n"
-                    "• Link is invalid or deleted\n"
-                    "• Platform is blocking downloads\n\n"
-                    "For private videos, SITE_COOKIES must be set."
+                    "Possible reasons:\n• Private / Age-restricted\n• Invalid link\n• Platform blocking\n\n"
+                    "Make sure SITE_COOKIES and SAVERAPI_KEY are set."
                 )
                 return
 
-            fitting_paths = [
-                p for p in file_paths if os.path.getsize(p) / (1024 * 1024) <= MAX_FILESIZE_MB
-            ]
-            skipped = len(file_paths) - len(fitting_paths)
-
-            if not fitting_paths:
-                await status_msg.edit_text(
-                    f"*❌ This file is larger than {MAX_FILESIZE_MB}MB limit.*"
-                )
+            fitting = [p for p in file_paths if os.path.getsize(p) / (1024*1024) <= MAX_FILESIZE_MB]
+            skipped = len(file_paths) - len(fitting)
+            if not fitting:
+                await status_msg.edit_text(f"*❌ File larger than {MAX_FILESIZE_MB}MB limit.*")
                 return
 
             await status_msg.edit_text("📤 Uploading...")
-
             try:
-                await send_downloaded_files(update, fitting_paths, caption, url)
+                await send_downloaded_files(update, fitting, caption, url)
             except TelegramError as e:
-                msg = str(e).lower()
-                if "entity too large" in msg or "too big" in msg or "file is too big" in msg:
-                    await status_msg.edit_text(
-                        "*❌ File is larger than Telegram's 50MB upload limit.*\n"
-                        "To send bigger files you need a Local Bot API Server."
-                    )
+                if "too big" in str(e).lower() or "entity too large" in str(e).lower():
+                    await status_msg.edit_text("*❌ File exceeds Telegram's 50MB limit.*")
                     return
                 raise
 
             deduct_point(user_id)
-
             if skipped:
-                await update.message.reply_text(
-                    f"⚠️ {skipped} item(s) were skipped because they exceeded {MAX_FILESIZE_MB}MB limit."
-                )
-
+                await update.message.reply_text(f"⚠️ {skipped} item(s) skipped (over size limit).")
             await status_msg.delete()
 
         except Exception as e:
             progress_task.cancel()
-            logger.error(f"Unexpected error: {e}")
-            error_text = str(e)
-            if "Private" in error_text or "Age-restricted" in error_text or "Login required" in error_text:
-                await status_msg.edit_text(f"❌ {error_text}")
-            else:
-                await status_msg.edit_text(f"❌ Something went wrong: {e}")
+            logger.error(f"Error: {e}")
+            await status_msg.edit_text(f"❌ {e}")
 
 def main():
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise RuntimeError("BOT_TOKEN is not set.")
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
@@ -1103,7 +932,6 @@ def main():
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(referral_callback, pattern="^show_referral$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     logger.info("Bot started...")
     app.run_polling()
 
