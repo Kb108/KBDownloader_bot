@@ -112,8 +112,9 @@ SKIP_EXTENSIONS = (".part", ".ytdl", ".json", ".description", ".info.json")
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 logging.basicConfig(
@@ -521,13 +522,18 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
         "no_warnings": True,
         "merge_output_format": "mp4",
         "playlistend": 10,
-        "retries": 3,
-        "fragment_retries": 3,
-        "http_headers": HTTP_HEADERS,
+        "retries": 5,
+        "fragment_retries": 5,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.instagram.com/",
+        },
         "extractor_args": {
             "youtube": {
                 "player_client": ["android", "web", "tv"],
-            }
+            },
         },
     }
 
@@ -535,7 +541,7 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
         ydl_opts["cookiefile"] = COOKIES_FILE
         logger.info("Using cookies for yt-dlp")
     else:
-        logger.warning("No valid cookies file")
+        logger.warning("No valid cookies file found")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -544,11 +550,12 @@ def _ytdlp_download(url: str, download_dir: str) -> tuple:
         error_msg = str(e).lower()
         if any(x in error_msg for x in [
             "private video", "sign in", "login required", "age-restricted",
-            "members-only", "premium", "this video is private", "confirm your age"
+            "members-only", "premium", "this video is private", "confirm your age",
+            "login to instagram", "challenge", "rate-limit", "please wait"
         ]):
             raise Exception(
-                "This video is Private / Age-restricted / Members-only.\n"
-                "Please set SITE_COOKIES with a logged-in account cookies."
+                "This video is Private / Age-restricted / Login required.\n"
+                "Please update SITE_COOKIES with fresh Instagram cookies."
             ) from e
         raise
 
@@ -638,27 +645,30 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
 def download_media(url: str, download_dir: str) -> tuple:
     url = _resolve_redirect(url)
 
+    # First try SaverAPI (best for Instagram)
     files, caption = _saverapi_download(url, download_dir)
     if files:
-        logger.info(f"[{url}] SaverAPI: {len(files)} file(s)")
+        logger.info(f"[{url}] downloaded via SaverAPI: {len(files)} file(s)")
         return files, caption
 
+    # Then try yt-dlp
     try:
         files, caption = _ytdlp_download(url, download_dir)
         if files:
-            logger.info(f"[{url}] yt-dlp: {len(files)} file(s)")
+            logger.info(f"[{url}] downloaded via yt-dlp: {len(files)} file(s)")
     except Exception as e:
         logger.warning(f"[{url}] yt-dlp failed: {e}")
-        if "Private" in str(e) or "Age-restricted" in str(e) or "Members-only" in str(e):
+        if "Private" in str(e) or "Age-restricted" in str(e) or "Login required" in str(e):
             raise
         files, caption = [], ""
 
+    # Last resort
     if not files:
         files, caption = _fallback_scrape(url, download_dir)
         if files:
-            logger.info(f"[{url}] fallback: {len(files)} file(s)")
+            logger.info(f"[{url}] downloaded via fallback scrape: {len(files)} file(s)")
         else:
-            logger.error(f"[{url}] all tiers failed")
+            logger.error(f"[{url}] all three download tiers failed.")
 
     return files, caption
 
@@ -1069,7 +1079,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_task.cancel()
             logger.error(f"Unexpected error: {e}")
             error_text = str(e)
-            if "Private" in error_text or "Age-restricted" in error_text or "Members-only" in error_text:
+            if "Private" in error_text or "Age-restricted" in error_text or "Login required" in error_text:
                 await status_msg.edit_text(f"❌ {error_text}")
             else:
                 await status_msg.edit_text(f"❌ Something went wrong: {e}")
