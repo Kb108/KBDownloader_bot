@@ -39,6 +39,10 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 MAX_FILESIZE_MB = int(os.environ.get("MAX_FILESIZE_MB", "100"))
 
+# Optional: self-hosted Telegram Bot API server (raises upload limit from 50MB to 2000MB).
+# Example: LOCAL_BOT_API_URL=http://localhost:8081
+LOCAL_BOT_API_URL = os.environ.get("LOCAL_BOT_API_URL", "").rstrip("/")
+
 SHOPPING_OFFER_LABEL = os.environ.get("SHOPPING_OFFER_LABEL", "🛒 Amazon Flipkart Offer")
 SHOPPING_OFFER_URL = os.environ.get("SHOPPING_OFFER_URL", FORCE_SUB_CHANNEL_LINK)
 
@@ -654,7 +658,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_downloaded_files(update, fitting, caption, url)
             except TelegramError as e:
                 if "too big" in str(e).lower() or "entity too large" in str(e).lower():
-                    await status_msg.edit_text("❌ File exceeds Telegram's 50MB limit.")
+                    await status_msg.edit_text("❌ File is too big for Telegram to send.")
                     return
                 raise
 
@@ -670,7 +674,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise RuntimeError("BOT_TOKEN is not set.")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    builder = ApplicationBuilder().token(BOT_TOKEN)
+    if LOCAL_BOT_API_URL:
+        builder = (
+            builder.base_url(f"{LOCAL_BOT_API_URL}/bot")
+            .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+            .local_mode(True)
+        )
+        logger.info(f"Using local Bot API server: {LOCAL_BOT_API_URL}")
+    else:
+        logger.info("Using official Bot API (50MB upload limit).")
+    app = builder.build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
