@@ -4,7 +4,6 @@ import json
 import logging
 import tempfile
 import asyncio
-import time
 from urllib.parse import quote
 import requests
 import yt_dlp
@@ -46,17 +45,11 @@ SHOPPING_OFFER_URL = os.environ.get("SHOPPING_OFFER_URL", FORCE_SUB_CHANNEL_LINK
 BOT_SERVICE_LABEL = os.environ.get("BOT_SERVICE_LABEL", "🤖 Our Bot Service")
 BOT_SERVICE_LINK = os.environ.get("BOT_SERVICE_LINK", "https://t.me/KbBotService")
 
-PREMIUM_PRICE_LABEL = os.environ.get("PREMIUM_PRICE_LABEL", "₹20 / month")
-PREMIUM_CONTACT = "@share_kb"
-PREMIUM_DAYS_DEFAULT = int(os.environ.get("PREMIUM_DAYS_DEFAULT", "30"))
+SUPPORT_CONTACT = os.environ.get("SUPPORT_CONTACT", "@share_kb")
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
-
-STARTER_POINTS = int(os.environ.get("STARTER_POINTS", "3"))
-REFERRAL_POINTS = int(os.environ.get("REFERRAL_POINTS", "10"))
-POINTS_FILE = os.path.join(DATA_DIR, "points.json")
 
 SAVERAPI_KEY = os.environ.get("SAVERAPI_KEY", "")
 
@@ -115,7 +108,6 @@ MAIN_MENU = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🚀 Start"), KeyboardButton("📋 Supported Sites")],
         [KeyboardButton("🆘 Help"), KeyboardButton("📢 Our Channel")],
-        [KeyboardButton("🎁 Refer & Earn"), KeyboardButton("💎 Premium")],
     ],
     resize_keyboard=True,
 )
@@ -123,14 +115,13 @@ MAIN_MENU = ReplyKeyboardMarkup(
 ADMIN_MENU = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status"), KeyboardButton("👥 Total Users")],
-        [KeyboardButton("📢 Broadcast"), KeyboardButton("💎 Give Premium")],
-        [KeyboardButton("ℹ️ How to Give Premium"), KeyboardButton("🔙 User Menu")],
+        [KeyboardButton("📢 Broadcast"), KeyboardButton("🔙 User Menu")],
     ],
     resize_keyboard=True,
 )
 
 # ----------------------------------------------------------------------
-# STORAGE
+# STORAGE (only user list, used for broadcast & stats)
 # ----------------------------------------------------------------------
 def load_users() -> set:
     if os.path.exists(USERS_FILE):
@@ -147,93 +138,6 @@ def save_user(user_id: int):
         users.add(user_id)
         with open(USERS_FILE, "w") as f:
             json.dump(list(users), f)
-
-def load_points() -> dict:
-    if os.path.exists(POINTS_FILE):
-        try:
-            with open(POINTS_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_points(data: dict):
-    with open(POINTS_FILE, "w") as f:
-        json.dump(data, f)
-
-def _get_or_init_record(user_id: int, data: dict) -> dict:
-    key = str(user_id)
-    if key not in data:
-        data[key] = {"points": STARTER_POINTS, "referred_by": None, "referral_count": 0}
-    return data[key]
-
-def get_points(user_id: int) -> int:
-    data = load_points()
-    record = _get_or_init_record(user_id, data)
-    save_points(data)
-    return record["points"]
-
-def get_referral_count(user_id: int) -> int:
-    data = load_points()
-    record = _get_or_init_record(user_id, data)
-    save_points(data)
-    return record.get("referral_count", 0)
-
-def has_points(user_id: int) -> bool:
-    if user_id == ADMIN_ID or is_premium(user_id):
-        return True
-    return get_points(user_id) > 0
-
-def deduct_point(user_id: int) -> bool:
-    if user_id == ADMIN_ID or is_premium(user_id):
-        return True
-    data = load_points()
-    record = _get_or_init_record(user_id, data)
-    if record["points"] <= 0:
-        save_points(data)
-        return False
-    record["points"] -= 1
-    save_points(data)
-    return True
-
-def register_referral(referrer_id: int, new_user_id: int) -> bool:
-    if referrer_id == new_user_id:
-        return False
-    data = load_points()
-    new_record = _get_or_init_record(new_user_id, data)
-    if new_record.get("referred_by") is not None:
-        save_points(data)
-        return False
-    new_record["referred_by"] = referrer_id
-    referrer_record = _get_or_init_record(referrer_id, data)
-    referrer_record["points"] += REFERRAL_POINTS
-    referrer_record["referral_count"] = referrer_record.get("referral_count", 0) + 1
-    save_points(data)
-    return True
-
-def grant_premium(user_id: int, days: int):
-    data = load_points()
-    record = _get_or_init_record(user_id, data)
-    now = time.time()
-    base = max(record.get("premium_until") or 0, now)
-    record["premium_until"] = base + days * 86400
-    save_points(data)
-
-def is_premium(user_id: int) -> bool:
-    data = load_points()
-    record = _get_or_init_record(user_id, data)
-    save_points(data)
-    until = record.get("premium_until")
-    return bool(until and until > time.time())
-
-def premium_days_left(user_id: int) -> int:
-    data = load_points()
-    record = _get_or_init_record(user_id, data)
-    save_points(data)
-    until = record.get("premium_until")
-    if not until or until <= time.time():
-        return 0
-    return int((until - time.time()) // 86400) + 1
 
 # ----------------------------------------------------------------------
 # HELPERS
@@ -269,96 +173,6 @@ def video_action_keyboard(source_url: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL),
     ]])
 
-def referral_link_for(user_id: int, bot_username: str) -> str:
-    return f"https://t.me/{bot_username}?start=ref_{user_id}"
-
-async def send_referral_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    bot_username = context.bot.username
-    link = referral_link_for(user_id, bot_username)
-    points = get_points(user_id)
-    referrals = get_referral_count(user_id)
-    text = (
-        "*🎁 Refer & Earn Points*\n\n"
-        f"🔗 Your referral link:\n`{link}`\n\n"
-        f"⭐ Your current points: *{points}*\n"
-        f"👥 Total referrals: *{referrals}*\n\n"
-        "*How it works:*\n"
-        f"• 1 referral = *{REFERRAL_POINTS} points*\n"
-        "• 1 download = *1 point*\n\n"
-        f"When a friend joins using your link, you get *{REFERRAL_POINTS} points* instantly."
-    )
-    await update.effective_message.reply_text(
-        text, parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📤 Share this link",
-                url=f"https://t.me/share/url?url={quote(link, safe='')}&text={quote('🎬 Download any video or photo for free!', safe='')}")
-        ]])
-    )
-
-async def referral_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await send_referral_info(update, context)
-
-async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_referral_info(update, context)
-
-async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if is_premium(user_id):
-        days_left = premium_days_left(user_id)
-        text = (
-            f"*💎 You already have Premium!*\n\n"
-            f"*Remaining Days:* {days_left} day(s)\n\n"
-            f"*Unlimited downloads* — no points needed.\n\n"
-            f"For any problem contact: *{PREMIUM_CONTACT}*"
-        )
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    text = (
-        "*💎 Get Premium — Unlimited Downloads*\n\n"
-        "*About this Bot:*\n"
-        "Download videos & photos from YouTube, Facebook, Instagram, TikTok and many more sites easily.\n\n"
-        f"*Premium Price:* Only *{PREMIUM_PRICE_LABEL}*\n\n"
-        "*Benefits:*\n"
-        "✅ Unlimited downloads\n✅ No points required\n✅ Priority support\n\n"
-        f"*To buy Premium contact:*\n*{PREMIUM_CONTACT}*\n\n"
-        "Send payment screenshot + your Telegram username or User ID.\n\n"
-        f"For any problem contact: *{PREMIUM_CONTACT}*"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-async def addpremium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if not context.args:
-        await update.message.reply_text(
-            f"*Usage:*\n`/addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]`\n\n"
-            f"*Example:*\n`/addpremium 123456789 30`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    try:
-        target_id = int(context.args[0])
-        days = int(context.args[1]) if len(context.args) > 1 else PREMIUM_DAYS_DEFAULT
-    except ValueError:
-        await update.message.reply_text(
-            f"*Usage:*\n`/addpremium <user_id> [days={PREMIUM_DAYS_DEFAULT}]`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    grant_premium(target_id, days)
-    await update.message.reply_text(f"✅ Premium granted to `{target_id}` for *{days}* day(s).", parse_mode=ParseMode.MARKDOWN)
-    try:
-        await context.bot.send_message(
-            chat_id=target_id,
-            text=f"*🎉 Your Premium is now active for {days} day(s)!*\nUnlimited downloads unlocked.\n\nFor any problem contact: *{PREMIUM_CONTACT}*",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    except TelegramError:
-        pass
-
 async def is_subscribed(bot, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=FORCE_SUB_CHANNEL, user_id=user_id)
@@ -383,13 +197,13 @@ def _resolve_redirect(url: str) -> str:
     try:
         resp = requests.head(url, headers=HTTP_HEADERS, allow_redirects=True, timeout=10)
         return resp.url
-    except:
+    except Exception:
         try:
             resp = requests.get(url, headers=HTTP_HEADERS, allow_redirects=True, timeout=15, stream=True)
             final = resp.url
             resp.close()
             return final
-        except:
+        except Exception:
             return url
 
 def _clean_caption(text) -> str:
@@ -437,7 +251,7 @@ def _saverapi_download(url: str, download_dir: str) -> tuple:
             r.raise_for_status()
             if len(r.content) < 10000:
                 continue
-        except:
+        except Exception:
             continue
 
         content_type = r.headers.get("Content-Type", "").lower()
@@ -520,7 +334,6 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
         return [], ""
 
     media_urls = []
-    # Improved patterns - prefer high quality images, skip profile pics & small thumbnails
     patterns = [
         r'"display_url":"(https://[^"]+)"',
         r'"image_versions2":\{"candidates":\[\{"url":"(https://[^"]+)"',
@@ -542,7 +355,7 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
     if cap_match:
         try:
             caption = _clean_caption(cap_match.group(1).encode().decode("unicode_escape"))
-        except:
+        except Exception:
             caption = _clean_caption(cap_match.group(1))
     else:
         og = re.search(r'property="og:description" content="([^"]+)"', html)
@@ -573,7 +386,7 @@ def _fallback_scrape(url: str, download_dir: str) -> tuple:
             with open(path, "wb") as f:
                 f.write(r.content)
             files.append(path)
-        except:
+        except Exception:
             continue
     return files, caption
 
@@ -660,7 +473,6 @@ async def send_downloaded_files(update: Update, file_paths: list, caption: str =
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    is_new = user_id not in load_users()
     save_user(user_id)
 
     if user_id == ADMIN_ID:
@@ -671,35 +483,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_join_prompt(update)
         return
 
-    if is_new and context.args and context.args[0].startswith("ref_"):
-        try:
-            referrer_id = int(context.args[0][4:])
-            if referrer_id and register_referral(referrer_id, user_id):
-                try:
-                    await context.bot.send_message(chat_id=referrer_id, text=f"*🎉 New user joined with your link!*\n+{REFERRAL_POINTS} points added.", parse_mode=ParseMode.MARKDOWN)
-                except:
-                    pass
-        except:
-            pass
-
-    points = get_points(user_id)
     await update.message.reply_text(
         "*👋 Welcome to KB Downloader!*\n\n"
         "📥 Send any video, photo or audio link from:\n"
         "▶️ YouTube • Facebook • Instagram • TikTok and more\n\n"
-        f"⭐ Your points: *{points}* (1 point = 1 download)\n"
-        f"🎁 Refer a friend to earn +{REFERRAL_POINTS} points!\n\n"
+        "🆓 *100% Free — Unlimited downloads!*\n\n"
         f"⚠️ Max file size: {MAX_FILESIZE_MB}MB\n\n"
         "🚀 Just send a link to start!",
         parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU,
     )
     await update.message.reply_text("👇 Check these out:", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton(SHOPPING_OFFER_LABEL, url=SHOPPING_OFFER_URL), InlineKeyboardButton(BOT_SERVICE_LABEL, url=BOT_SERVICE_LINK)],
-        [InlineKeyboardButton("🎁 Refer & Earn Points", callback_data="show_referral")],
     ]))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"*🆘 Need Help?*\n\nContact: *{PREMIUM_CONTACT}*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
+    await update.message.reply_text(f"*🆘 Need Help?*\n\nContact: *{SUPPORT_CONTACT}*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
@@ -711,17 +509,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     users = load_users()
-    points_data = load_points()
-    premium_count = sum(1 for r in points_data.values() if r.get("premium_until", 0) > time.time())
     await update.message.reply_text(
-        f"*📊 Bot Status*\n\n👥 Total Users: *{len(users)}*\n💎 Active Premium: *{premium_count}*\n⭐ Starter Points: {STARTER_POINTS}\n🎁 Referral Points: {REFERRAL_POINTS}",
+        f"*📊 Bot Status*\n\n👥 Total Users: *{len(users)}*\n🆓 Mode: Free (unlimited)",
         parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU,
     )
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     if await is_subscribed(context.bot, query.from_user.id):
+        await query.answer()
         await query.edit_message_text("✅ Thanks for joining! You can now send links.")
     else:
         await query.answer("❌ You haven't joined yet!", show_alert=True)
@@ -759,7 +555,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await context.bot.send_message(chat_id=uid, text=text)
             sent += 1
-        except:
+        except Exception:
             failed += 1
         await asyncio.sleep(0.05)
     await status.edit_text(f"✅ Broadcast finished.\nSent: {sent}\nFailed: {failed}")
@@ -772,7 +568,7 @@ async def _animate_progress(status_msg, bot, chat_id):
             try:
                 await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
                 await status_msg.edit_text(frames[i % 4])
-            except:
+            except Exception:
                 pass
             i += 1
             await asyncio.sleep(1.5)
@@ -782,6 +578,7 @@ async def _animate_progress(status_msg, bot, chat_id):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
+    save_user(user_id)
 
     if user_id == ADMIN_ID:
         if text == "📊 Status":
@@ -792,12 +589,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if text == "📢 Broadcast":
             await update.message.reply_text("*📢 How to Broadcast:*\n\n1. Reply with `/broadcast`\n2. Or `/broadcast message`", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
-            return
-        if text == "💎 Give Premium":
-            await update.message.reply_text("*💎 Give Premium:*\n\n`/addpremium <user_id> [days]`\n\nExample: `/addpremium 123456789 30`", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
-            return
-        if text == "ℹ️ How to Give Premium":
-            await update.message.reply_text("*ℹ️ How to Give Premium:*\n\n1. Get User ID from @userinfobot\n2. Run `/addpremium USER_ID 30`", parse_mode=ParseMode.MARKDOWN, reply_markup=ADMIN_MENU)
             return
         if text == "🔙 User Menu":
             await update.message.reply_text("*🏠 Switched to User Menu:*", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_MENU)
@@ -821,12 +612,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    if text == "🎁 Refer & Earn":
-        await send_referral_info(update, context)
-        return
-    if text == "💎 Premium":
-        await premium_command(update, context)
-        return
 
     if not await is_subscribed(context.bot, user_id):
         await send_join_prompt(update)
@@ -842,15 +627,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("*Sorry, this site is not supported yet.*\nTap 📋 Supported Sites.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    if not has_points(user_id):
-        link = referral_link_for(user_id, context.bot.username)
-        await update.message.reply_text(
-            f"*❌ You are out of points.*\n\n*🎁 Share your link to earn +{REFERRAL_POINTS} points!*\n\n🔗 `{link}`\n\n*💎 Or buy Premium:* {PREMIUM_CONTACT}",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 Share & Earn Points", url=f"https://t.me/share/url?url={quote(link, safe='')}")]])
-        )
-        return
-
     status_msg = await update.message.reply_text("⏳ Starting download...")
     progress_task = asyncio.create_task(_animate_progress(status_msg, context.bot, update.effective_chat.id))
 
@@ -862,16 +638,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not file_paths:
                 await status_msg.edit_text(
-                    "*❌ Could not download this media.*\n\n"
-                    "Possible reasons:\n• Private / Restricted content\n• Invalid link\n• Platform blocking\n\n"
-                    "Make sure SITE_COOKIES + SAVERAPI_KEY are set correctly."
+                    "❌ Could not download this media.\n\n"
+                    "Possible reasons:\n• Private / Restricted content\n• Invalid link\n• Platform blocking"
                 )
                 return
 
             fitting = [p for p in file_paths if os.path.getsize(p) / (1024 * 1024) <= MAX_FILESIZE_MB]
             skipped = len(file_paths) - len(fitting)
             if not fitting:
-                await status_msg.edit_text(f"*❌ File larger than {MAX_FILESIZE_MB}MB limit.*")
+                await status_msg.edit_text(f"❌ File larger than {MAX_FILESIZE_MB}MB limit.")
                 return
 
             await status_msg.edit_text("📤 Uploading...")
@@ -879,11 +654,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_downloaded_files(update, fitting, caption, url)
             except TelegramError as e:
                 if "too big" in str(e).lower() or "entity too large" in str(e).lower():
-                    await status_msg.edit_text("*❌ File exceeds Telegram's 50MB limit.*")
+                    await status_msg.edit_text("❌ File exceeds Telegram's 50MB limit.")
                     return
                 raise
 
-            deduct_point(user_id)
             if skipped:
                 await update.message.reply_text(f"⚠️ {skipped} item(s) skipped (size limit).")
             await status_msg.delete()
@@ -901,14 +675,10 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("admin", menu_command))
-    app.add_handler(CommandHandler("refer", refer_command))
-    app.add_handler(CommandHandler("premium", premium_command))
-    app.add_handler(CommandHandler("addpremium", addpremium_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(MessageHandler(filters.CaptionRegex(BROADCAST_CAPTION_RE), broadcast_command))
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
-    app.add_handler(CallbackQueryHandler(referral_callback, pattern="^show_referral$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started...")
     app.run_polling()
